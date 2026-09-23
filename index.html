@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Earth-Moon Sim — Phase 1 / M1</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+      #hud {
+        position: fixed; top: 8px; left: 8px; z-index: 10;
+        font: 12px/1.6 ui-monospace, Consolas, monospace;
+        color: #cfe3ff; background: rgba(0, 10, 25, 0.55);
+        padding: 8px 10px; border-radius: 6px;
+        white-space: pre; pointer-events: none;
+      }
+      #help {
+        position: fixed; bottom: 8px; left: 8px; z-index: 10;
+        font: 12px/1.5 ui-monospace, Consolas, monospace;
+        color: #9fd8b0; background: rgba(0, 10, 25, 0.45);
+        padding: 6px 9px; border-radius: 6px; pointer-events: none;
+      }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <div id="hud"></div>
+    <div id="help">クリックでマウス視点 / WASD 移動 / Q E 上下（惑星の真上方向） / Shift 加速 / 1-5 速度倍率 / G ワイヤー / R 自動水平化切替 / Esc マウス解放</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
