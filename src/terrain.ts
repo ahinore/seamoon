@@ -92,7 +92,7 @@ export function terrainColor(
   h: number,
   slope = 0,
 ): [number, number, number] {
-  const m = fbm3(x * 8, y * 8, z * 8, SEED + 555, 3); // moisture-ish [-1,1]
+  const m = fbm3(x * 8, y * 8, z * 8, SEED + 555, 2); // moisture-ish [-1,1]
 
   if (h < 0) {
     // ocean: shallow -> deep

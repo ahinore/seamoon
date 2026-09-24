@@ -43,11 +43,22 @@ export interface BuiltTile {
 /**
  * Builds one quadtree tile of the cube sphere WITH terrain (Phase 3).
  *
- * Elevation comes from terrainHeight(dir) — the CPU truth also used for
- * collision later. Vertex layout: (res x res) surface grid + 1-vertex skirt
- * ring around it. Local offsets are computed in double BEFORE being stored
- * into the Float32Array: p_local = dir * (R + h) - center ("center (double) +
- * local offset (float)" from Phase 2).
+ * PERF (profiled): terrainHeight is ~2 us/call, so per-vertex sampling x4
+ * (position + 3 forward-difference evals for the normal) cost ~33 ms/tile —
+ * the worst frame-time offender at 12 builds/frame. Instead we sample ONE
+ * (n+2)x(n+2) height lattice (the vertex grid extended by 1 cell per side)
+ * and derive:
+ *   - positions: dir * (R + h_lattice)
+ *   - normals:   forward differences ACROSS the lattice (zero extra evals)
+ *   - colors:    from the same lattice height + a lattice slope estimate
+ * => ~4.5k height evals per tile instead of ~18k. The difference stencil
+ * spans the same one-cell spacing as before, so results match the old
+ * normals to float precision.
+ *
+ * Vertex layout: (res x res) surface grid + 1-vertex skirt ring around it.
+ * Local offsets are computed in double BEFORE being stored into the
+ * Float32Array: p_local = dir * (R + h) - center ("center (double) + local
+ * offset (float)" from Phase 2).
  *
  * Skirt vertices drop skirtDepth below the terrain of their edge, so cracks
  * against coarser neighbours stay covered even with elevation.
@@ -85,77 +96,103 @@ export function buildTileGeometry(
   const oneLevel = (edge * edge) / (2 * (res - 1) * (res - 1) * radius);
   const skirtDepth = oneLevel * 20 + MAX_ELEV;
 
+  // ---- shared height lattice: grid extended by 1 cell on every side ----
+  // Lattice (I,J) with I,J in 0..n+1 maps to grid (ii, jj) = I-1, J-1 in
+  // [-1..n]; vertices use ii/jj clamped to [0..n-1] (=> lattice 1..n), and
+  // the outer ring serves the forward-difference stencil at the borders.
+  const nLat = n + 2;
+  const hLat = new Float64Array(nLat * nLat);
+  const dirLat = new Float64Array(nLat * nLat * 3);
+  for (let J = 0; J < nLat; J++) {
+    for (let I = 0; I < nLat; I++) {
+      const ii = I - 1;
+      const jj = J - 1;
+      const u = u0 + (scale * ii) / (n - 1);
+      const v = v0 + (scale * jj) / (n - 1);
+      cubeToSphereDir(face, u, v, dir);
+      const k = J * nLat + I;
+      hLat[k] = terrainHeight(dir.x, dir.y, dir.z);
+      dirLat[k * 3] = dir.x;
+      dirLat[k * 3 + 1] = dir.y;
+      dirLat[k * 3 + 2] = dir.z;
+    }
+  }
+  // meters between adjacent lattice points (for the slope estimate)
+  const spacing = edge / (n - 1);
+
   const positions = new Float32Array(nu * nu * 3);
   const normals = new Float32Array(nu * nu * 3);
   const centers = new Float32Array(nu * nu * 3);
   const grids = new Float32Array(nu * nu * 3);
   const colors = new Float32Array(nu * nu * 3);
 
-  let ptr = 0;
-  let gptr = 0;
-  // Terrain normal sampling: forward differences over the height field.
-  // eps ~ one vertex spacing keeps normals LOD-appropriate (coarse tiles get
-  // smooth normals => no aliasing at distance; detail fades in on approach).
-  const spacing = edge / (n - 1);
-  const eps = spacing / radius; // angular step in radians
-  const t1 = new THREE.Vector3();
-  const t2 = new THREE.Vector3();
-  const up = Math.abs(dir.z) < 0.9 ? pB.set(0, 0, 1) : pB.set(1, 0, 0);
   const p0 = new THREE.Vector3();
   const p1 = new THREE.Vector3();
   const p2 = new THREE.Vector3();
   const nrm = new THREE.Vector3();
-  const samplePos = (dx: number, dy: number, dz: number, out: THREE.Vector3) => {
-    out.set(dir.x + dx, dir.y + dy, dir.z + dz).normalize();
-    const h = terrainHeight(out.x, out.y, out.z);
-    return out.multiplyScalar(radius + h);
-  };
+
+  let ptr = 0;
+  let gptr = 0;
   for (let j = 0; j < nu; j++) {
     for (let i = 0; i < nu; i++) {
       const skirt = i === 0 || j === 0 || i === nu - 1 || j === nu - 1;
       const ii = Math.min(Math.max(i - 1, 0), n - 1);
       const jj = Math.min(Math.max(j - 1, 0), n - 1);
-      const u = u0 + (scale * ii) / (n - 1);
-      const v = v0 + (scale * jj) / (n - 1);
-      cubeToSphereDir(face, u, v, dir);
-      const h = terrainHeight(dir.x, dir.y, dir.z);
+      const I = ii + 1;
+      const J = jj + 1;
+      const k = J * nLat + I;
+      const hx = dirLat[k * 3];
+      const hy = dirLat[k * 3 + 1];
+      const hz = dirLat[k * 3 + 2];
+      const h = hLat[k];
       const r = skirt ? radius + h - skirtDepth : radius + h;
       // double-precision subtraction before float32 quantization
-      positions[ptr] = dir.x * r - center.x;
-      positions[ptr + 1] = dir.y * r - center.y;
-      positions[ptr + 2] = dir.z * r - center.z;
+      positions[ptr] = hx * r - center.x;
+      positions[ptr + 1] = hy * r - center.y;
+      positions[ptr + 2] = hz * r - center.z;
+
       if (skirt) {
-        // skirt copies its edge vertex normal; computed below on the seam pass
-        normals[ptr] = dir.x;
-        normals[ptr + 1] = dir.y;
-        normals[ptr + 2] = dir.z;
+        // skirt is a hidden wall: sphere normal, shading irrelevant
+        normals[ptr] = hx;
+        normals[ptr + 1] = hy;
+        normals[ptr + 2] = hz;
       } else {
-        // height-field normal via forward differences (3 height evals)
-        up.set(0, 0, 1);
-        if (Math.abs(dir.z) > 0.9) up.set(1, 0, 0);
-        t1.crossVectors(up, dir).normalize();
-        t2.crossVectors(dir, t1).normalize();
-        samplePos(0, 0, 0, p0);
-        samplePos(t1.x * eps, t1.y * eps, t1.z * eps, p1);
-        samplePos(t2.x * eps, t2.y * eps, t2.z * eps, p2);
-        nrm.crossVectors(p1.sub(p0), p2.sub(p0)).normalize();
-        // ensure outward
-        if (nrm.dot(dir) < 0) nrm.negate();
+        // Height-field normal via lattice forward differences: pR/pU are the
+        // neighbor positions (+u / +v axes); cross(pR-p0, pU-p0) is outward
+        // for the CCW (u x v = axis) parameterization.
+        const kR = J * nLat + (I + 1);
+        const kU = (J + 1) * nLat + I;
+        const r0 = radius + h;
+        const rR = radius + hLat[kR];
+        const rU = radius + hLat[kU];
+        p0.set(hx * r0, hy * r0, hz * r0);
+        p1.set(dirLat[kR * 3] * rR, dirLat[kR * 3 + 1] * rR, dirLat[kR * 3 + 2] * rR).sub(p0);
+        p2.set(dirLat[kU * 3] * rU, dirLat[kU * 3 + 1] * rU, dirLat[kU * 3 + 2] * rU).sub(p0);
+        nrm.crossVectors(p1, p2).normalize();
+        if (nrm.dot(p0) < 0) nrm.negate();
         normals[ptr] = nrm.x;
         normals[ptr + 1] = nrm.y;
         normals[ptr + 2] = nrm.z;
       }
-      centers[ptr] = dir.x * radius - center.x;
-      centers[ptr + 1] = dir.y * radius - center.y;
-      centers[ptr + 2] = dir.z * radius - center.z;
+      centers[ptr] = hx * radius - center.x;
+      centers[ptr + 1] = hy * radius - center.y;
+      centers[ptr + 2] = hz * radius - center.z;
       // grid coordinates + skirt flag for shader-drawn wireframe
       grids[gptr] = ii;
       grids[gptr + 1] = jj;
       grids[gptr + 2] = skirt ? 1 : 0;
-      const c = terrainColor(dir.x, dir.y, dir.z, h);
-      colors[ptr] = c[0];
-      colors[ptr + 1] = c[1];
-      colors[ptr + 2] = c[2];
+      if (!skirt) {
+        // slope for biome rock: max |dh| over one cell / spacing (tangent)
+        const dR = Math.abs(hLat[J * nLat + (I + 1)] - h);
+        const dL = Math.abs(h - hLat[J * nLat + (I - 1)]);
+        const dU = Math.abs(hLat[(J + 1) * nLat + I] - h);
+        const dD = Math.abs(h - hLat[(J - 1) * nLat + I]);
+        const slope = Math.max(dR, dL, dU, dD) / spacing;
+        const c = terrainColor(hx, hy, hz, h, slope);
+        colors[ptr] = c[0];
+        colors[ptr + 1] = c[1];
+        colors[ptr + 2] = c[2];
+      }
       ptr += 3;
       gptr += 3;
     }

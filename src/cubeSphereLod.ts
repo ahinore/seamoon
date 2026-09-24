@@ -14,6 +14,12 @@ export interface PlanetOptions {
   /** Max tile builds per frame (synchronous in M1; moves to a Worker in M3). */
   buildBudget?: number;
   /**
+   * Wall-clock time budget for tile builds per update call (ms). Tile
+   * generation is CPU-bound, so this — not a build count — is what keeps
+   * frame spikes bounded. Replaces the old fixed-count budget.
+   */
+  buildBudgetMs?: number;
+  /**
    * Screen-footprint cap in pixels: a tile spanning more than this on screen
    * is split regardless of curvature error. Keeps the region near the camera
    * refined at grazing angles, where a smooth sphere has almost no sag error
@@ -91,7 +97,7 @@ export class PlanetView {
   constructor(scene: THREE.Scene, radius: number, material: THREE.Material, opts: PlanetOptions = {}) {
     this.radius = radius;
     this.material = material;
-    this.o = { maxLevel: 20, tauPx: 2, res: 65, cacheSize: 300, buildBudget: 12, capPx: 350, ...opts };
+    this.o = { maxLevel: 20, tauPx: 2, res: 65, cacheSize: 300, buildBudget: 12, buildBudgetMs: 6, capPx: 350, ...opts };
 
     // Roots are built synchronously so the planet exists from frame 1.
     for (let f = 0; f < 6; f++) {
@@ -307,8 +313,12 @@ export class PlanetView {
     this.queue.sort(
       (a, b) => this.camPos.distanceToSquared(a.center) - this.camPos.distanceToSquared(b.center),
     );
-    const budget = Math.min(this.o.buildBudget, this.queue.length);
-    for (let i = 0; i < budget; i++) {
+    // Time-budgeted instead of fixed count: tile generation is CPU-heavy
+    // (~13 ms/tile after the lattice optimization), so 12/frame stalled the
+    // main thread for up to 160 ms. Build nearest-first until the frame's
+    // budget is spent; the queue persists across frames.
+    const deadline = performance.now() + this.o.buildBudgetMs;
+    while (this.queue.length > 0 && performance.now() < deadline) {
       const node = this.queue.shift()!;
       if (node.dead || node.tile) continue;
       node.tile = this.acquireTile(node);
