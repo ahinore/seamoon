@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { terrainHeight, terrainColor, MAX_ELEV } from './terrain';
 
 // Cube face definitions.
 // axis = outward normal of the face, u/v = tangents with cross(u, v) = axis.
@@ -40,16 +41,16 @@ export interface BuiltTile {
 }
 
 /**
- * Builds one quadtree tile of the cube sphere.
+ * Builds one quadtree tile of the cube sphere WITH terrain (Phase 3).
  *
- * Vertex layout: (res x res) surface grid + 1-vertex skirt ring around it.
- * Local vertex offsets are computed in double (JS number) BEFORE being stored
- * into the Float32Array: p_local = dir * r - center. This is the "center
- * (double) + local offset (float)" layout from Phase 2, applied from day one,
- * so small tiles never suffer world-magnitude float32 quantization.
+ * Elevation comes from terrainHeight(dir) — the CPU truth also used for
+ * collision later. Vertex layout: (res x res) surface grid + 1-vertex skirt
+ * ring around it. Local offsets are computed in double BEFORE being stored
+ * into the Float32Array: p_local = dir * (R + h) - center ("center (double) +
+ * local offset (float)" from Phase 2).
  *
- * Skirt depth scales with the level: the T-junction gap against a one-level
- * coarser neighbour is ~ edge^2 / (2 * (res-1)^2 * R); we use 3x that.
+ * Skirt vertices drop skirtDepth below the terrain of their edge, so cracks
+ * against coarser neighbours stay covered even with elevation.
  */
 export function buildTileGeometry(
   face: number,
@@ -71,27 +72,44 @@ export function buildTileGeometry(
   const pA = new THREE.Vector3();
   const pB = new THREE.Vector3();
 
-  // Tile center (on the sphere surface)
+  // Tile center: use the SPHERE point (not elevated terrain) as the frame
+  // origin of the tile — stable, and local offsets stay small either way.
   cubeToSphereDir(face, u0 + scale * 0.5, v0 + scale * 0.5, dir);
   const center = dir.clone().multiplyScalar(radius);
 
-  // Skirt depth: deep enough to swallow T-junction cracks against neighbours
-  // several levels coarser (the gap at a level difference of k scales as
-  // (2^k - 1)^2 * oneLevelGap^2 / (2R)). 20x one-level covers ~3 levels of
-  // difference; deeper skirts cost nothing except hidden surface slivers.
+  // Skirt depth: swallow T-junction gaps against neighbours up to ~3 levels
+  // coarser, PLUS full terrain amplitude so skirts stay buried under relief.
   cubeToSphereDir(face, u0, v0, pA);
   cubeToSphereDir(face, u1, v0, pB);
   const edge = pA.distanceTo(pB);
   const oneLevel = (edge * edge) / (2 * (res - 1) * (res - 1) * radius);
-  const skirtDepth = oneLevel * 20;
+  const skirtDepth = oneLevel * 20 + MAX_ELEV;
 
   const positions = new Float32Array(nu * nu * 3);
   const normals = new Float32Array(nu * nu * 3);
   const centers = new Float32Array(nu * nu * 3);
   const grids = new Float32Array(nu * nu * 3);
+  const colors = new Float32Array(nu * nu * 3);
 
   let ptr = 0;
   let gptr = 0;
+  // Terrain normal sampling: forward differences over the height field.
+  // eps ~ one vertex spacing keeps normals LOD-appropriate (coarse tiles get
+  // smooth normals => no aliasing at distance; detail fades in on approach).
+  const spacing = edge / (n - 1);
+  const eps = spacing / radius; // angular step in radians
+  const t1 = new THREE.Vector3();
+  const t2 = new THREE.Vector3();
+  const up = Math.abs(dir.z) < 0.9 ? pB.set(0, 0, 1) : pB.set(1, 0, 0);
+  const p0 = new THREE.Vector3();
+  const p1 = new THREE.Vector3();
+  const p2 = new THREE.Vector3();
+  const nrm = new THREE.Vector3();
+  const samplePos = (dx: number, dy: number, dz: number, out: THREE.Vector3) => {
+    out.set(dir.x + dx, dir.y + dy, dir.z + dz).normalize();
+    const h = terrainHeight(out.x, out.y, out.z);
+    return out.multiplyScalar(radius + h);
+  };
   for (let j = 0; j < nu; j++) {
     for (let i = 0; i < nu; i++) {
       const skirt = i === 0 || j === 0 || i === nu - 1 || j === nu - 1;
@@ -100,14 +118,33 @@ export function buildTileGeometry(
       const u = u0 + (scale * ii) / (n - 1);
       const v = v0 + (scale * jj) / (n - 1);
       cubeToSphereDir(face, u, v, dir);
-      const r = skirt ? radius - skirtDepth : radius;
+      const h = terrainHeight(dir.x, dir.y, dir.z);
+      const r = skirt ? radius + h - skirtDepth : radius + h;
       // double-precision subtraction before float32 quantization
       positions[ptr] = dir.x * r - center.x;
       positions[ptr + 1] = dir.y * r - center.y;
       positions[ptr + 2] = dir.z * r - center.z;
-      normals[ptr] = dir.x;
-      normals[ptr + 1] = dir.y;
-      normals[ptr + 2] = dir.z;
+      if (skirt) {
+        // skirt copies its edge vertex normal; computed below on the seam pass
+        normals[ptr] = dir.x;
+        normals[ptr + 1] = dir.y;
+        normals[ptr + 2] = dir.z;
+      } else {
+        // height-field normal via forward differences (3 height evals)
+        up.set(0, 0, 1);
+        if (Math.abs(dir.z) > 0.9) up.set(1, 0, 0);
+        t1.crossVectors(up, dir).normalize();
+        t2.crossVectors(dir, t1).normalize();
+        samplePos(0, 0, 0, p0);
+        samplePos(t1.x * eps, t1.y * eps, t1.z * eps, p1);
+        samplePos(t2.x * eps, t2.y * eps, t2.z * eps, p2);
+        nrm.crossVectors(p1.sub(p0), p2.sub(p0)).normalize();
+        // ensure outward
+        if (nrm.dot(dir) < 0) nrm.negate();
+        normals[ptr] = nrm.x;
+        normals[ptr + 1] = nrm.y;
+        normals[ptr + 2] = nrm.z;
+      }
       centers[ptr] = dir.x * radius - center.x;
       centers[ptr + 1] = dir.y * radius - center.y;
       centers[ptr + 2] = dir.z * radius - center.z;
@@ -115,6 +152,10 @@ export function buildTileGeometry(
       grids[gptr] = ii;
       grids[gptr + 1] = jj;
       grids[gptr + 2] = skirt ? 1 : 0;
+      const c = terrainColor(dir.x, dir.y, dir.z, h);
+      colors[ptr] = c[0];
+      colors[ptr + 1] = c[1];
+      colors[ptr + 2] = c[2];
       ptr += 3;
       gptr += 3;
     }
@@ -139,6 +180,7 @@ export function buildTileGeometry(
   geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
   geometry.setAttribute('center', new THREE.BufferAttribute(centers, 3));
   geometry.setAttribute('aGrid', new THREE.BufferAttribute(grids, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geometry.setIndex(new THREE.BufferAttribute(idx, 1));
   geometry.computeBoundingSphere();
 

@@ -177,6 +177,17 @@ let probe: ProbeFn | null = null;
             ]);
           }
         }
+      } else if (preset === 'm') {
+        // m: 12x8 color matrix over the central 80% — poor man's screenshot
+        pts = [];
+        for (let my = 0; my < 8; my++) {
+          for (let mx = 0; mx < 12; mx++) {
+            pts.push([
+              Math.floor(W * (0.1 + (0.8 * mx) / 11)),
+              Math.floor(H * (0.1 + (0.8 * my) / 7)),
+            ]);
+          }
+        }
       } else if (preset === 'j') {
         // j: jitter meter — framebuffer row diff between frames while the
         // camera is stationary. Persistent state in closure.
@@ -195,7 +206,21 @@ let probe: ProbeFn | null = null;
         const med = [...bright].sort((a, b) => a[1] - b[1])[Math.floor(bright.length / 2)][1];
         anom = bright.filter((c) => c[1] < med * 0.55).length;
       }
-      const show = preset === 'g' ? `g anomalies=${anom}/${rgb.length}` : `rgb=${rgb.map((c) => c.join(',')).join(' | ')} planet=${planetCount}/${rgb.length}`;
+      const show =
+        preset === 'g'
+          ? `g anomalies=${anom}/${rgb.length}`
+          : preset === 'm'
+            ? `m\n` + rgb
+                .reduce<string[][]>((rows, c, i) => {
+                  const r = Math.floor(i / 12);
+                  (rows[r] ??= []).push(
+                    `${c[0].toString(16).padStart(2, '0')}${c[1].toString(16).padStart(2, '0')}${c[2].toString(16).padStart(2, '0')}`,
+                  );
+                  return rows;
+                }, [])
+                .map((r) => r.join(' '))
+                .join('\n')
+            : `rgb=${rgb.map((c) => c.join(',')).join(' | ')} planet=${planetCount}/${rgb.length}`;
       if (preset === 'j') {
         // Read one horizontal row through the planet center and diff it
         // against the previous frame. Stationary camera => any delta is

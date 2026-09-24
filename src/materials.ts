@@ -18,13 +18,16 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       #include <common>
       attribute vec3 center;
       attribute vec3 aGrid;
+      attribute vec3 color;
       varying vec3 vN;
       varying vec3 vC;
       varying vec3 vGrid;
+      varying vec3 vCol;
       void main() {
         vN = normalize(mat3(modelMatrix) * normal);
         vC = center;
         vGrid = aGrid;
+        vCol = color;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
       }
@@ -36,9 +39,11 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       varying vec3 vN;
       varying vec3 vC;
       varying vec3 vGrid;
+      varying vec3 vCol;
       void main() {
         float ndl = clamp(dot(normalize(vN), uSunDir), 0.0, 1.0);
-        vec3 col = uBase * (0.05 + 0.95 * ndl);
+        // per-vertex terrain color (sRGB-ish values authored in linear space)
+        vec3 col = vCol * (0.08 + 0.92 * ndl);
         // Wireframe overlay drawn IN the surface shader (front faces only,
         // depth-tested). Two layers:
         //  - tile boundary lines: always (1 px), uniform at every LOD level

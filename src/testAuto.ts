@@ -49,8 +49,17 @@ export class AutoPilot {
     }
     this.world = world;
     // Start on +Z (absolute), looking straight down at the surface below.
+    // ?lat/&lon (deg) relocate the hover point onto any spot on the globe —
+    // used by terrain tests to hover over known landmasses.
+    const lat = num(q, 'lat', 0) * Math.PI / 180;
+    const lon = num(q, 'lon', 0) * Math.PI / 180;
+    const pos = _pos.set(
+      Math.cos(lat) * Math.cos(lon),
+      Math.sin(lat),
+      Math.cos(lat) * Math.sin(lon),
+    ).multiplyScalar(PLANET_R + this.alt0);
     this.world.origin.set(0, 0, 0);
-    rig.camera.position.set(0, 0, PLANET_R + this.alt0);
+    rig.camera.position.copy(pos);
     rig.camera.up.set(0, 1, 0);
     rig.camera.lookAt(0, 0, 0);
   }
@@ -172,6 +181,7 @@ export class AutoPilot {
 const ORIGIN = new THREE.Vector3(0, 0, 0);
 const _abs = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
+const _pos = new THREE.Vector3();
 const _rel = new THREE.Vector3();
 const _relLook = new THREE.Vector3();
 
