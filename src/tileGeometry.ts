@@ -75,11 +75,15 @@ export function buildTileGeometry(
   cubeToSphereDir(face, u0 + scale * 0.5, v0 + scale * 0.5, dir);
   const center = dir.clone().multiplyScalar(radius);
 
-  // Skirt depth from tile edge chord
+  // Skirt depth: deep enough to swallow T-junction cracks against neighbours
+  // several levels coarser (the gap at a level difference of k scales as
+  // (2^k - 1)^2 * oneLevelGap^2 / (2R)). 20x one-level covers ~3 levels of
+  // difference; deeper skirts cost nothing except hidden surface slivers.
   cubeToSphereDir(face, u0, v0, pA);
   cubeToSphereDir(face, u1, v0, pB);
   const edge = pA.distanceTo(pB);
-  const skirtDepth = ((edge * edge) / (2 * (res - 1) * (res - 1) * radius)) * 3;
+  const oneLevel = (edge * edge) / (2 * (res - 1) * (res - 1) * radius);
+  const skirtDepth = oneLevel * 20;
 
   const positions = new Float32Array(nu * nu * 3);
   const normals = new Float32Array(nu * nu * 3);
