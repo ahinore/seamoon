@@ -69,6 +69,12 @@ if ((renderer as unknown as { capabilities: { reverseDepthBuffer: boolean } }).c
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
+// ?fov=<deg> (25..120) for wide-FoV testing. The screenshot of the
+// screen-edge hole was likely taken with a wide/zoomed-out view — FoV
+// widens the frustum but pxPerUnit shrinks proportionally, so SSE splits
+// stay correct; only the far-plane reach per angle changes.
+const fovDeg = Math.min(Math.max(Number(urlParams.get('fov') ?? '60') || 60, 25), 120);
+
 // Floating origin (Phase 2): absolute space lives in `world`; the camera and
 // all rendered meshes live in frame-relative space that stays small.
 const world = new WorldOrigin();
@@ -98,6 +104,8 @@ const rig = new CameraRig(
   // normalized. (Getting the sign wrong here tumbles the auto-leveler.)
   () => _up.copy(world.origin).normalize(),
 );
+rig.camera.fov = fovDeg;
+rig.camera.updateProjectionMatrix();
 rigRef = rig;
 const _up = new THREE.Vector3();
 
