@@ -29,15 +29,31 @@ export function terrainHeight(x: number, y: number, z: number): number {
   const c = fbm3(x * 1.2, y * 1.2, z * 1.2, SEED, 4);
   const land = smoothstep(-0.08, 0.12, c);
 
+  // Domain warping: bend the input of the ridge/hill layers by a mid-frequency
+  // noise field. Breaks up the radial symmetry of plain fBm and gives ranges
+  // their curved, tectonic-looking sweep. Warp magnitude ~ 0.02 rad keeps
+  // features inside their continent without smearing the coast mask itself.
+  const wx = fbm3(x * 6 + 11.3, y * 6, z * 6, SEED + 901, 3);
+  const wy = fbm3(x * 6, y * 6 + 7.7, z * 6, SEED + 902, 3);
+  const wz = fbm3(x * 6, y * 6, z * 6 + 3.1, SEED + 903, 3);
+  const W = 0.02;
+  const px = x + wx * W;
+  const py = y + wy * W;
+  const pz = z + wz * W;
+
   // mountain ranges: ridged noise, 320 km -> 10 km wavelengths
-  const m = ridged3(x * 20, y * 20, z * 20, SEED + 77, 6);
+  const m = ridged3(px * 20, py * 20, pz * 20, SEED + 77, 6);
   const mountainMask = land * smoothstep(0.06, 0.38, c);
 
   // rolling hills: 40 km -> 2.5 km wavelengths, everywhere on land
-  const d = fbm3(x * 160, y * 160, z * 160, SEED + 191, 5);
+  const d = fbm3(px * 160, py * 160, pz * 160, SEED + 191, 5);
 
-  // fine detail: 4 km -> 500 m wavelengths (matters below ~30 km altitude)
-  const f = fbm3(x * 1600, y * 1600, z * 1600, SEED + 313, 4);
+  // fine detail: 4 km -> 500 m wavelengths (matters below ~30 km altitude).
+  // Slope/erosion damping: ridges are steep, and steep young relief carries
+  // less fine sediment — attenuate the fine octave on high ridges. Cheap
+  // stand-in for real erosion until Phase 10.
+  const f = fbm3(px * 1600, py * 1600, pz * 1600, SEED + 313, 4);
+  const erosion = 1 - 0.75 * mountainMask * m;
 
   // ocean floor: gentle negative relief
   const ocean = -900 - 2200 * smoothstep(0.0, -0.6, c);
@@ -46,7 +62,7 @@ export function terrainHeight(x: number, y: number, z: number): number {
     60 * land +                        // coastal plains baseline
     3800 * mountainMask * m +          // mountain ranges
     500 * d * land +                   // hills
-    160 * f * land;                    // fine roughness
+    160 * f * land * erosion;          // fine roughness, damped on ridges
 
   return land * landElev + (1 - land) * ocean;
 }
