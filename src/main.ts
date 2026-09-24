@@ -315,11 +315,15 @@ renderer.setAnimationLoop(() => {
   stars.position.copy(rig.camera.position);
 
   // Atmosphere shell follows the planet center (-origin in frame space) and
-  // feeds the shader the camera pose in the same frame.
+  // feeds the shader the camera pose in the same frame. The terrain material
+  // shares the aerial-perspective uniforms.
   atmosphere.position.copy(world.origin).negate();
   atmoUniforms.uCamPos.value.copy(rig.camera.position);
   atmoUniforms.uOrigin.value.copy(world.origin);
-  (material.uniforms.uSunDir as THREE.IUniform) && (atmoUniforms.uSunDir.value.copy(material.uniforms.uSunDir.value as THREE.Vector3), 0);
+  atmoUniforms.uSunDir.value.copy(material.uniforms.uSunDir.value as THREE.Vector3);
+  (material.uniforms.uCamPos.value as THREE.Vector3).copy(rig.camera.position);
+  (material.uniforms.uOrigin.value as THREE.Vector3).copy(world.origin);
+  (material.uniforms.uSunDir.value as THREE.Vector3).copy(atmoUniforms.uSunDir.value);
 
   renderer.render(scene, rig.camera);
   hud.frame(dt);

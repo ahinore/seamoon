@@ -13,6 +13,17 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uSunDir: { value: new THREE.Vector3(1, 0.3, 0.35).normalize() },
       uBase: { value: new THREE.Color(0x1f5fa8) },
       uWire: { value: 0 },
+      // Aerial perspective (Phase 5): distance fog toward the in-scattered
+      // atmosphere color. Shared uniform objects with the atmosphere shell
+      // so terrain and shell always agree on sun/camera/frame geometry.
+      uCamPos: { value: new THREE.Vector3() },
+      uOrigin: { value: new THREE.Vector3() },
+      uPlanetR: { value: 6_371_000 },
+      uAtmoR: { value: 6_371_000 + 60_000 },
+      uBetaR: { value: new THREE.Vector3(5.8e-6, 13.5e-6, 33.1e-6) },
+      uBetaM: { value: new THREE.Vector3(4e-6, 4e-6, 4e-6) },
+      uHR: { value: 8500 },
+      uHM: { value: 1200 },
     },
     vertexShader: /* glsl */ `
       #include <common>
@@ -23,11 +34,13 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       varying vec3 vC;
       varying vec3 vGrid;
       varying vec3 vCol;
+      varying vec3 vWorld;
       void main() {
         vN = normalize(mat3(modelMatrix) * normal);
         vC = center;
         vGrid = aGrid;
         vCol = color;
+        vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
       }
@@ -36,15 +49,63 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uniform vec3 uSunDir;
       uniform vec3 uBase;
       uniform float uWire;
+      uniform vec3 uCamPos;
+      uniform vec3 uOrigin;
+      uniform float uPlanetR;
+      uniform float uAtmoR;
+      uniform vec3 uBetaR;
+      uniform vec3 uBetaM;
+      uniform float uHR;
+      uniform float uHM;
       varying vec3 vN;
       varying vec3 vC;
       varying vec3 vGrid;
       varying vec3 vCol;
+      varying vec3 vWorld;
       void main() {
         // wrapped Lambert: soft terminator instead of a hard day/night cut
         float ndl = clamp((dot(normalize(vN), uSunDir) + 0.18) / 1.18, 0.0, 1.0);
         // per-vertex terrain color (sRGB-ish values authored in linear space)
         vec3 col = vCol * (0.10 + 0.90 * ndl);
+
+        // Aerial perspective: cheap single-scatter fog toward the atmosphere
+        // color. Optical depth from the exponential density over the view
+        // distance (no per-pixel integration — 2 samples suffice for fog).
+        // Planet center is at -uOrigin in frame space; vWorld/uCamPos are
+        // frame-relative, matching the atmosphere shell's frame.
+        {
+          vec3 pc = -uOrigin;
+          vec3 ro = uCamPos - pc;
+          vec3 rEnd = vWorld - pc;
+          float dist = distance(uCamPos, vWorld);
+          vec3 rd = (rEnd - ro) / max(dist, 1e-3);
+          // midpoint density as the fog weight (fine for 60 km shell)
+          vec3 mid = ro + rd * (dist * 0.5);
+          float hgt = max(length(mid) - uPlanetR, 0.0);
+          float dR = exp(-hgt / uHR) * dist;
+          float dM = exp(-hgt / uHM) * dist;
+          vec3 odView = vec3(dR * uBetaR.x, dR * uBetaR.y, dR * uBetaR.z) + dM * uBetaM;
+          // light optical depth: from the midpoint toward the sun (2 samples)
+          vec3 p0 = mid;
+          vec3 p1 = mid + uSunDir * (uHR * 2.0);
+          float h0 = max(length(p0) - uPlanetR, 0.0);
+          float h1 = max(length(p1) - uPlanetR, 0.0);
+          float sLen = distance(p0, p1);
+          float sdR = (exp(-h0 / uHR) + exp(-h1 / uHR)) * 0.5 * sLen;
+          float sdM = (exp(-h0 / uHM) + exp(-h1 / uHM)) * 0.5 * sLen;
+          vec3 odSun = vec3(sdR * uBetaR.x, sdR * uBetaR.y, sdR * uBetaR.z) + sdM * uBetaM;
+          float mu = dot(rd, uSunDir);
+          float phR = 3.0 / (16.0 * 3.14159) * (1.0 + mu * mu);
+          float g = 0.76;
+          float phM = 3.0 / (8.0 * 3.14159) * ((1.0 - g*g)*(1.0+mu*mu)) / ((2.0+g*g)*pow(1.0+g*g-2.0*g*mu, 1.5));
+          vec3 inscatter = (vec3(dR * uBetaR.x, dR * uBetaR.y, dR * uBetaR.z) * phR + dM * uBetaM * phM) * exp(-odSun);
+          // sun height fade at the fragment (night side: fog vanishes)
+          float sunH = dot(normalize(mid), uSunDir);
+          inscatter *= smoothstep(-0.15, 0.1, sunH);
+          float fog = clamp(1.0 - exp(-min(dR * uBetaR.x + dM * uBetaM.x, 12.0)), 0.0, 1.0);
+          // never fully swallow nearby terrain; cap fog at 85%
+          col = mix(col, inscatter * 1.15, min(fog, 0.85));
+        }
         // Wireframe overlay drawn IN the surface shader (front faces only,
         // depth-tested). Two layers:
         //  - tile boundary lines: always (1 px), uniform at every LOD level
