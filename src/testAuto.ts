@@ -70,17 +70,26 @@ export class AutoPilot {
     rig.camera.up.set(0, 1, 0);
     // Tilt first (around the local east axis), then lookAt keeps the intent:
     // lookAt would collapse a horizon pitch, so rotate the nadir quaternion.
+    // ?hdg (deg) then spins the view around the local zenith to match any
+    // manually-flown pose; ?level=0 disables auto-level (repro of manual flights).
     const pitchDeg = num(q, 'pitch', -90);
     rig.camera.lookAt(0, 0, 0);
+    const east = _east.set(
+      -Math.sin(lon),
+      0,
+      Math.cos(lat) * Math.cos(lon),
+    ).normalize();
     if (pitchDeg !== -90) {
-      const east = _east.set(
-        -Math.sin(lon),
-        0,
-        Math.cos(lat) * Math.cos(lon),
-      ).normalize();
       const qTilt = _qt.setFromAxisAngle(east, (pitchDeg + 90) * Math.PI / 180);
       rig.camera.quaternion.premultiply(qTilt);
     }
+    const hdgDeg = num(q, 'hdg', 0);
+    if (hdgDeg !== 0) {
+      const up = _pos.copy(pos).normalize();
+      const qHdg = _qt.setFromAxisAngle(up, -hdgDeg * Math.PI / 180);
+      rig.camera.quaternion.premultiply(qHdg);
+    }
+    if (q.get('level') === '0') rig.autoLevel = false;
     // Remember the spawn pose for the H (home) key.
     this.homePos.copy(pos);
     this.homeQ.copy(rig.camera.quaternion);

@@ -41,9 +41,10 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       varying vec3 vGrid;
       varying vec3 vCol;
       void main() {
-        float ndl = clamp(dot(normalize(vN), uSunDir), 0.0, 1.0);
+        // wrapped Lambert: soft terminator instead of a hard day/night cut
+        float ndl = clamp((dot(normalize(vN), uSunDir) + 0.18) / 1.18, 0.0, 1.0);
         // per-vertex terrain color (sRGB-ish values authored in linear space)
-        vec3 col = vCol * (0.08 + 0.92 * ndl);
+        vec3 col = vCol * (0.10 + 0.90 * ndl);
         // Wireframe overlay drawn IN the surface shader (front faces only,
         // depth-tested). Two layers:
         //  - tile boundary lines: always (1 px), uniform at every LOD level
