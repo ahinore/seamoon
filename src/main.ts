@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CameraRig } from './cameraRig';
 import { PlanetView } from './cubeSphereLod';
 import { makePlanetMaterial, makeStars } from './materials';
+import { makeAtmosphereMesh, makeAtmosphereUniforms } from './atmosphere';
 import { Hud } from './hud';
 import { AutoPilot } from './testAuto';
 import { WorldOrigin } from './world';
