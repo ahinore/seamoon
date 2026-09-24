@@ -17,11 +17,14 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
     vertexShader: /* glsl */ `
       #include <common>
       attribute vec3 center;
+      attribute vec2 aGrid;
       varying vec3 vN;
       varying vec3 vC;
+      varying vec2 vGrid;
       void main() {
         vN = normalize(mat3(modelMatrix) * normal);
         vC = center;
+        vGrid = aGrid;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
       }
@@ -32,10 +35,20 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uniform float uWire;
       varying vec3 vN;
       varying vec3 vC;
+      varying vec2 vGrid;
       void main() {
         float ndl = clamp(dot(normalize(vN), uSunDir), 0.0, 1.0);
         vec3 col = uBase * (0.05 + 0.95 * ndl);
-        if (uWire > 0.5) col = mix(col, vec3(1.0), 0.45);
+        // Wireframe overlay drawn IN the surface shader: 1-px grid lines via
+        // screen-space derivatives. Only front faces exist here (solid pass),
+        // so no back-face edges, and the sphere's own depth test hides lines
+        // behind the horizon. No diagonal edges (quad grid, not triangles).
+        if (uWire > 0.5) {
+          vec2 gw = fwidth(vGrid) + 1e-6;
+          vec2 gf = abs(fract(vGrid - 0.5) - 0.5) / gw;
+          float line = 1.0 - clamp(min(gf.x, gf.y), 0.0, 1.0);
+          col = mix(col, vec3(0.95), line * 0.85);
+        }
         gl_FragColor = vec4(col, 1.0);
         #include <colorspace_fragment>
       }

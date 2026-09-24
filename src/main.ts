@@ -103,6 +103,8 @@ const _up = new THREE.Vector3();
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyG') {
+    // Wireframe overlay is drawn in the fragment shader (grid lines on the
+    // visible surface only — no back-face edges, no diagonal clutter).
     material.uniforms.uWire.value = material.uniforms.uWire.value > 0.5 ? 0 : 1;
   }
 });
