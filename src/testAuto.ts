@@ -56,6 +56,8 @@ export class AutoPilot {
     // Start on +Z (absolute), looking straight down at the surface below.
     // ?lat/&lon (deg) relocate the hover point onto any spot on the globe —
     // used by terrain tests to hover over known landmasses.
+    // ?pitch (deg) tilts the view up from nadir (0 = straight down, -90 =
+    // horizon) — reproduces grazing-angle LOD screens.
     const lat = num(q, 'lat', 0) * Math.PI / 180;
     const lon = num(q, 'lon', 0) * Math.PI / 180;
     const pos = _pos.set(
@@ -66,10 +68,20 @@ export class AutoPilot {
     this.world.origin.set(0, 0, 0);
     rig.camera.position.copy(pos);
     rig.camera.up.set(0, 1, 0);
+    // Tilt first (around the local east axis), then lookAt keeps the intent:
+    // lookAt would collapse a horizon pitch, so rotate the nadir quaternion.
+    const pitchDeg = num(q, 'pitch', -90);
     rig.camera.lookAt(0, 0, 0);
-    // Remember the spawn pose for the H (home) key. lookAt leaves the camera's
-    // up ~ +Y; for lat=±90 the spawn up is degenerate, so rebuild it the same
-    // way place() does (world +Y as the reference up).
+    if (pitchDeg !== -90) {
+      const east = _east.set(
+        -Math.sin(lon),
+        0,
+        Math.cos(lat) * Math.cos(lon),
+      ).normalize();
+      const qTilt = _qt.setFromAxisAngle(east, (pitchDeg + 90) * Math.PI / 180);
+      rig.camera.quaternion.premultiply(qTilt);
+    }
+    // Remember the spawn pose for the H (home) key.
     this.homePos.copy(pos);
     this.homeQ.copy(rig.camera.quaternion);
   }
@@ -202,6 +214,8 @@ const ORIGIN = new THREE.Vector3(0, 0, 0);
 const _abs = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
 const _pos = new THREE.Vector3();
+const _east = new THREE.Vector3();
+const _qt = new THREE.Quaternion();
 const _rel = new THREE.Vector3();
 const _relLook = new THREE.Vector3();
 
