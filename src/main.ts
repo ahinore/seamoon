@@ -91,6 +91,15 @@ const planet = new PlanetView(scene, R, material, {
 const stars = makeStars(2500, 6e8);
 scene.add(stars);
 
+// Phase 5: atmosphere shell. The mesh sits at the frame-relative planet
+// center (-origin each frame) and its shader takes the frame-relative
+// camera position and the floating origin as uniforms.
+const atmoUniforms = makeAtmosphereUniforms(R);
+const atmosphere = makeAtmosphereMesh(R, atmoUniforms);
+scene.add(atmosphere);
+// ?atmo=0 disables the shell (A/B for diagnosis)
+if (urlParams.get('atmo') === '0') atmosphere.visible = false;
+
 const hud = new Hud('hud');
 const absCam = new THREE.Vector3(0, 0, R * 4); // absolute camera position
 let rigRef: CameraRig | null = null;
@@ -304,6 +313,13 @@ renderer.setAnimationLoop(() => {
   // Keep distant scenery centered on the camera (stars are only directions —
   // recenter them each frame so they never sit behind the far plane).
   stars.position.copy(rig.camera.position);
+
+  // Atmosphere shell follows the planet center (-origin in frame space) and
+  // feeds the shader the camera pose in the same frame.
+  atmosphere.position.copy(world.origin).negate();
+  atmoUniforms.uCamPos.value.copy(rig.camera.position);
+  atmoUniforms.uOrigin.value.copy(world.origin);
+  (material.uniforms.uSunDir as THREE.IUniform) && (atmoUniforms.uSunDir.value.copy(material.uniforms.uSunDir.value as THREE.Vector3), 0);
 
   renderer.render(scene, rig.camera);
   hud.frame(dt);

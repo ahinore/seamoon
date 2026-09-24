@@ -89,7 +89,8 @@ export function makeAtmosphereMesh(planetR: number, uniforms: AtmosphereUniforms
       // (Chapman-like approximation: exponential falloff integrated)
       vec3 opticalDepth(vec3 ro, vec3 rd, float tMax) {
         // sample 8 points, exponential density each
-        vec3 od = vec3(0.0);
+        vec3 odR = vec3(0.0);
+        float odM = 0.0;
         const int N = 8;
         float dt = tMax / float(N);
         for (int i = 0; i < N; i++) {
@@ -97,9 +98,10 @@ export function makeAtmosphereMesh(planetR: number, uniforms: AtmosphereUniforms
           float hgt = length(p) - uPlanetR;
           float dR = exp(-hgt / uHR) * dt;
           float dM = exp(-hgt / uHM) * dt;
-          od += vec3(dR) + dM; // R per-channel, M gray
+          odR += vec3(dR);
+          odM += dM;
         }
-        return vec3(od.x * uBetaR.x, od.y * uBetaR.y, od.z * uBetaR.z) + od * uBetaM * 0.0 + od * (uBetaM.x);
+        return odR * uBetaR + vec3(odM) * uBetaM;
       }
 
       void main() {
@@ -142,10 +144,11 @@ export function makeAtmosphereMesh(planetR: number, uniforms: AtmosphereUniforms
             float phR = 3.0 / (16.0 * 3.14159) * (1.0 + mu * mu);
             float g = 0.76;
             float phM = 3.0 / (8.0 * 3.14159) * ((1.0 - g*g)*(1.0+mu*mu)) / ((2.0+g*g)*pow(1.0+g*g-2.0*g*mu, 1.5));
-            vec3 tau = vec3(dR) * uBetaR + dM * uBetaM;
-            inscatter += (phR * vec3(dR) * uBetaR + phM * dM * uBetaM) * exp(-odSun);
+            vec3 tau = vec3(dR * uBetaR.x, dR * uBetaR.y, dR * uBetaR.z) + dM * uBetaM;
+            vec3 sc = vec3(dR * uBetaR.x, dR * uBetaR.y, dR * uBetaR.z) * phR + dM * uBetaM * phM;
+            inscatter += sc * exp(-odSun);
           }
-          totalOd += vec3(dR) * uBetaR + dM * uBetaM;
+          totalOd += vec3(dR * uBetaR.x, dR * uBetaR.y, dR * uBetaR.z) + dM * uBetaM;
         }
 
         // transmittance along the view ray
@@ -156,7 +159,7 @@ export function makeAtmosphereMesh(planetR: number, uniforms: AtmosphereUniforms
         float sunH = dot(normalize(mid), uSunDir);
         col *= smoothstep(-0.25, 0.05, sunH);
 
-        float alpha = 1.0 - T; // how much atmosphere is in front
+        float alpha = 1.0 - min(min(T.x, T.y), T.z); // how much atmosphere is in front
         gl_FragColor = vec4(col * 1.0, clamp(alpha * 1.2, 0.0, 1.0));
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
