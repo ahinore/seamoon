@@ -1,8 +1,15 @@
 import * as THREE from 'three';
 import type { CameraRig } from './cameraRig';
+import type { WorldOrigin } from './world';
+
+const PLANET_R = 6_371_000;
 
 /**
  * Test instrumentation for verifying milestones without manual input.
+ * All positions are handled in ABSOLUTE coordinates; the autopilot writes
+ * frame-relative camera positions through WorldOrigin, so tests stay correct
+ * while a floating origin is active (rebases happen mid-flight).
+ *
  * URL params:
  *   ?demo=drop&alt0=25000000&alt1=100   radial descent from alt0 to alt1 (m)
  *   ?demo=hover&alt=200000              static view from altitude
@@ -13,6 +20,9 @@ import type { CameraRig } from './cameraRig';
  *                                       the nadir-looking pose: pitch up to
  *                                       horizon, yaw 90°, pitch through +100°
  *                                       (proves gimbal-free quaternion look)
+ *   ?demo=orbit&alt=200000&span=deg     lateral arc flight at fixed altitude
+ *                                       (floating-origin stress: the camera
+ *                                       crosses rebase thresholds sideways)
  * The autopilot only moves the camera; LOD behavior stays production code.
  */
 export class AutoPilot {
@@ -23,26 +33,24 @@ export class AutoPilot {
   private cycles = 0;
   private lookPhase: 'A' | 'B' | 'C' | 'D' | 'E' = 'A';
   private h0 = 0;
-  private readonly radialDir: THREE.Vector3;
+  private orbitAngle = 0;
+  private readonly world: WorldOrigin;
 
-  constructor(rig: CameraRig) {
+  constructor(rig: CameraRig, world: WorldOrigin) {
     const q = new URLSearchParams(location.search);
     this.mode = q.get('demo') ?? '';
     this.alt0 = num(q, 'alt0', 25_000_000);
     this.alt1 = num(q, 'alt1', 100);
-    if (this.mode === 'hover') {
-      const alt = num(q, 'alt', 200_000);
+    if (this.mode === 'hover' || this.mode === 'look' || this.mode === 'orbit') {
+      const dflt = this.mode === 'hover' ? 200_000 : this.mode === 'look' ? 20_000 : 2_000_000;
+      const alt = num(q, 'alt', dflt);
       this.alt0 = alt;
       this.alt1 = alt;
     }
-    if (this.mode === 'look') {
-      const alt = num(q, 'alt', 20_000);
-      this.alt0 = alt;
-      this.alt1 = alt;
-    }
-    // Start on +Z, looking straight down at the surface point below.
-    this.radialDir = new THREE.Vector3(0, 0, 1);
-    rig.camera.position.copy(this.radialDir).multiplyScalar(6_371_000 + this.alt0);
+    this.world = world;
+    // Start on +Z (absolute), looking straight down at the surface below.
+    this.world.origin.set(0, 0, 0);
+    rig.camera.position.set(0, 0, PLANET_R + this.alt0);
     rig.camera.up.set(0, 1, 0);
     rig.camera.lookAt(0, 0, 0);
   }
@@ -52,9 +60,10 @@ export class AutoPilot {
     if (!this.mode) return null;
     if (this.phase === 'done') return `autopilot:${this.mode} done`;
 
-    const planetR = 6_371_000;
-    const p = rig.camera.position;
-    const alt = p.length() - planetR;
+    const planetR = PLANET_R;
+    // Absolute camera position (floating-origin aware).
+    const absP = this.world.abs(rig.camera.position, _abs);
+    const alt = absP.length() - planetR;
 
     if (this.mode === 'hover') {
       this.phase = 'done';
@@ -86,6 +95,18 @@ export class AutoPilot {
       }
       return `autopilot:bounce phase=up alt=${fmt(newAlt)} lo=${fmt(this.alt1)} hi=${fmt(this.alt0)} cycles=${this.cycles}`;
     }
+
+    if (this.mode === 'orbit') {
+      // Lateral arc at fixed altitude: crosses floating-origin rebase
+      // thresholds sideways, the direction real flight actually travels.
+      this.orbitAngle += dt;
+      const a = this.orbitAngle;
+      const r = planetR + this.alt0;
+      _abs.set(r * Math.sin(a), 0, r * Math.cos(a));
+      this.setAbs(rig, _abs, ORIGIN);
+      return `autopilot:orbit ang=${a.toFixed(2)} alt=${fmt(alt)}`;
+    }
+
     if (this.mode === 'look') {
       // Position stays fixed; only attitude changes, via the rig's own
       // view-relative rotation path (same code the mouse drives).
@@ -135,11 +156,24 @@ export class AutoPilot {
     return `autopilot:${this.mode} (unknown)`;
   }
 
+  /** Place the camera at an absolute radial position (nadir view). */
   private place(rig: CameraRig, planetR: number, alt: number): void {
-    rig.camera.position.copy(this.radialDir).multiplyScalar(planetR + alt);
-    rig.camera.lookAt(0, 0, 0);
+    _tmp.set(0, 0, planetR + alt);
+    this.setAbs(rig, _tmp, ORIGIN);
+  }
+
+  /** Set camera (frame-relative) from an absolute position + look target. */
+  private setAbs(rig: CameraRig, absPos: THREE.Vector3, lookAtAbs: THREE.Vector3): void {
+    rig.camera.position.copy(this.world.rel(absPos, _rel));
+    rig.camera.lookAt(this.world.rel(lookAtAbs, _relLook));
   }
 }
+
+const ORIGIN = new THREE.Vector3(0, 0, 0);
+const _abs = new THREE.Vector3();
+const _tmp = new THREE.Vector3();
+const _rel = new THREE.Vector3();
+const _relLook = new THREE.Vector3();
 
 const num = (q: URLSearchParams, k: string, d: number): number => {
   const v = q.get(k);

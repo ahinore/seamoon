@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 
 /**
- * Phase 1 planet material: single color + Lambert term against a fixed sun
- * direction. Deliberately a custom ShaderMaterial so Phases 3-5 can replace
- * the shading without touching the render pipeline. Includes three's log
- * depth chunks because the renderer runs with logarithmicDepthBuffer.
+ * Planet material: single color + Lambert term against a fixed sun direction.
+ * Deliberately a custom ShaderMaterial so Phases 3-5 can replace the shading
+ * without touching the render pipeline. Depth handling is reversed-Z: the
+ * renderer clears depth to 0 and tests GreaterEqual, and the camera's
+ * projection matrix flips the z axis, so shaders need no depth output work.
  */
 export function makePlanetMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
@@ -18,12 +19,11 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       attribute vec3 center;
       varying vec3 vN;
       varying vec3 vC;
-      #include <logdepthbuf_pars_vertex>
       void main() {
         vN = normalize(mat3(modelMatrix) * normal);
         vC = center;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        #include <logdepthbuf_vertex>
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
       }
     `,
     fragmentShader: /* glsl */ `
@@ -32,9 +32,7 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uniform float uWire;
       varying vec3 vN;
       varying vec3 vC;
-      #include <logdepthbuf_pars_fragment>
       void main() {
-        #include <logdepthbuf_fragment>
         float ndl = clamp(dot(normalize(vN), uSunDir), 0.0, 1.0);
         vec3 col = uBase * (0.05 + 0.95 * ndl);
         if (uWire > 0.5) col = mix(col, vec3(1.0), 0.45);
@@ -71,19 +69,15 @@ export function makeStars(count = 2500, radius = 6e8): THREE.Points {
       uniform float uSize;
       attribute float aMag;
       varying float vMag;
-      #include <logdepthbuf_pars_vertex>
       void main() {
         vMag = aMag;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         gl_PointSize = uSize;
-        #include <logdepthbuf_vertex>
       }
     `,
     fragmentShader: /* glsl */ `
       varying float vMag;
-      #include <logdepthbuf_pars_fragment>
       void main() {
-        #include <logdepthbuf_fragment>
         gl_FragColor = vec4(vec3(0.8 + 0.2 * vMag), 1.0);
         #include <colorspace_fragment>
       }

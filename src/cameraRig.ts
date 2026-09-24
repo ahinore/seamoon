@@ -29,6 +29,7 @@ export class CameraRig {
   private readonly keys = new Set<string>();
   private readonly el: HTMLElement;
   private readonly getAltitude: () => number;
+  private readonly getUp: () => THREE.Vector3;
 
   private readonly tmpQ = new THREE.Quaternion();
   private readonly levelQ = new THREE.Quaternion();
@@ -53,9 +54,11 @@ export class CameraRig {
     position: THREE.Vector3,
     lookAt: THREE.Vector3,
     getAltitude: () => number,
+    getUp: () => THREE.Vector3,
   ) {
     this.el = el;
     this.getAltitude = getAltitude;
+    this.getUp = getUp;
     this.camera = new THREE.PerspectiveCamera(60, 1, 1, 2e9);
     this.camera.position.copy(position);
     this.camera.lookAt(lookAt);
@@ -96,7 +99,7 @@ export class CameraRig {
   getLookAngles(): { pitch: number; bank: number; heading: number } {
     const q = this.camera.quaternion;
     this.fwd.set(0, 0, -1).applyQuaternion(q);
-    this.zenith.copy(this.camera.position).normalize();
+    this.zenith.copy(this.getUp());
     const pitch = THREE.MathUtils.radToDeg(Math.asin(clamp(this.fwd.dot(this.zenith), -1, 1)));
     let bank = 0;
     let heading = 0;
@@ -160,22 +163,20 @@ export class CameraRig {
     // keeping the forward direction exactly fixed. Skipped when fwd is within
     // ~13° of the zenith/nadir: the leveled frame is near-degenerate there
     // (rightH -> 0) and the slerp would orbit the camera around the zenith
-    // instead of letting it pass through.
+    // instead of letting it pass through. The zenith comes from a provider
+    // because with a floating origin camera.position is frame-relative.
     this.fwd.set(0, 0, -1).applyQuaternion(q);
-    this.zenith.copy(this.camera.position);
-    const r2 = this.zenith.lengthSq();
-    if (r2 > 1e-6) {
-      this.zenith.multiplyScalar(1 / Math.sqrt(r2));
-      if (this.autoLevel) {
-        this.rightH.crossVectors(this.fwd, this.zenith);
-        if (this.rightH.lengthSq() > 0.05) {
-          this.rightH.normalize();
-          this.upH.crossVectors(this.rightH, this.fwd); // unit, orthonormal
-          this.back.copy(this.fwd).negate();
-          this.basisM.makeBasis(this.rightH, this.upH, this.back);
-          this.levelQ.setFromRotationMatrix(this.basisM);
-          q.slerp(this.levelQ, 1 - Math.exp(-6 * dt));
-        }
+    this.zenith.copy(this.getUp()).normalize();
+    const hasZenith = this.zenith.lengthSq() > 0.5;
+    if (hasZenith && this.autoLevel) {
+      this.rightH.crossVectors(this.fwd, this.zenith);
+      if (this.rightH.lengthSq() > 0.05) {
+        this.rightH.normalize();
+        this.upH.crossVectors(this.rightH, this.fwd); // unit, orthonormal
+        this.back.copy(this.fwd).negate();
+        this.basisM.makeBasis(this.rightH, this.upH, this.back);
+        this.levelQ.setFromRotationMatrix(this.basisM);
+        q.slerp(this.levelQ, 1 - Math.exp(-6 * dt));
       }
     }
 
@@ -189,7 +190,7 @@ export class CameraRig {
     if (k.has('KeyS')) this.dir.sub(this.fwd);
     if (k.has('KeyD')) this.dir.add(this.right);
     if (k.has('KeyA')) this.dir.sub(this.right);
-    if (r2 > 1e-6) {
+    if (hasZenith) {
       if (k.has('KeyE')) this.dir.add(this.zenith);
       if (k.has('KeyQ')) this.dir.sub(this.zenith);
     }

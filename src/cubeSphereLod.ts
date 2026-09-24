@@ -72,6 +72,7 @@ export class PlanetView {
   private readonly cache = new Map<string, TileMesh>();
   private readonly queue: QNode[] = [];
   private readonly camPos = new THREE.Vector3();
+  private readonly originV = new THREE.Vector3();
   private pxPerUnit = 1;
   private readonly frustum = new THREE.Frustum();
   private readonly sphere = new THREE.Sphere();
@@ -90,6 +91,20 @@ export class PlanetView {
       node.tile.mesh.visible = true;
     }
     scene.add(this.root);
+  }
+
+  /** Re-place all currently visible tiles (e.g. after an origin rebase). */
+  forceReposition(origin: THREE.Vector3): void {
+    this.originV.copy(origin);
+    for (const r of this.roots) this.repositionSubtree(r);
+  }
+
+  private repositionSubtree(node: QNode): void {
+    if (node.tile) {
+      node.tile.mesh.position.copy(node.center).sub(this.originV);
+      node.tile.mesh.updateMatrix();
+    }
+    if (node.children) for (const c of node.children) this.repositionSubtree(c);
   }
 
   private makeNode(face: number, level: number, ix: number, iy: number): QNode {
@@ -131,11 +146,20 @@ export class PlanetView {
     };
   }
 
-  update(camera: THREE.PerspectiveCamera, viewportHeightPx: number): void {
+  /**
+   * @param camera frame-relative camera (its .position lives in frame space)
+   * @param origin floating-origin: absolute position of the frame origin.
+   * Tile centers are absolute and immutable; meshes are placed at
+   * center - origin (double math) every frame, so origin rebases never
+   * invalidate cached tile geometry.
+   */
+  update(camera: THREE.PerspectiveCamera, origin: THREE.Vector3, viewportHeightPx: number): void {
     camera.updateMatrixWorld();
+    this.originV.copy(origin);
     this.projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.projScreen);
-    this.camPos.copy(camera.position);
+    // Absolute camera position for LOD distance decisions.
+    this.camPos.copy(origin).add(camera.position);
     this.pxPerUnit = (viewportHeightPx * 0.5) / Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5);
 
     this.processQueue();
@@ -150,7 +174,11 @@ export class PlanetView {
   }
 
   private visit(node: QNode): void {
-    this.sphere.center.copy(node.center);
+    // Frustum test in frame-relative space (meshes live there too).
+    const cx = node.center.x - this.originV.x;
+    const cy = node.center.y - this.originV.y;
+    const cz = node.center.z - this.originV.z;
+    this.sphere.center.set(cx, cy, cz);
     this.sphere.radius = node.boundRadius;
     if (!this.frustum.intersectsSphere(this.sphere)) {
       this.hideSubtree(node);
@@ -192,6 +220,10 @@ export class PlanetView {
 
   private show(node: QNode): void {
     const t = node.tile!;
+    // Place the mesh in frame-relative space: double subtraction here is the
+    // camera/origin-relative handoff to float32 (the only quantization step).
+    t.mesh.position.copy(node.center).sub(this.originV);
+    t.mesh.updateMatrix();
     t.mesh.visible = true;
     this.stats.visibleTiles++;
     this.stats.triangles += t.triangles;
