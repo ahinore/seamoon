@@ -73,12 +73,25 @@ const smoothstep = (e0: number, e1: number, x: number): number => {
 };
 
 /**
- * Biome color for elevation + a moisture-ish noise.
- * Returns linear RGB in [0,1]. Deep ocean -> beach -> plains -> forest ->
- * rock -> snow, with the waterline exactly at h=0 (Phase 7 will replace
- * the ocean floor rendering with a real sea surface).
+ * Biome color: latitude (temperature) + elevation + slope + moisture noise,
+ * per the strategy note's Phase 4. Returns linear RGB in [0,1].
+ *
+ *  - temperature falls with |lat| and with altitude (6.5 K/km lapse rate);
+ *    the snowline therefore DROPS toward the poles (ice caps emerge naturally)
+ *  - slope (0..1, tan of the terrain gradient vs. its wavelength) pushes
+ *    vegetation to bare rock: steep = rock regardless of moisture
+ *  - moisture noise drives desert <-> grass <-> forest; wet coasts green up
+ *  - ocean: shallow -> deep gradient, waterline exactly at h=0 (Phase 7 will
+ *    replace the ocean floor rendering with a real sea surface)
+ *
+ * `slope` arrives precomputed by the tile builder from the same height field
+ * the mesh was displaced with, so shading and geometry can never disagree.
  */
-export function terrainColor(x: number, y: number, z: number, h: number): [number, number, number] {
+export function terrainColor(
+  x: number, y: number, z: number,
+  h: number,
+  slope = 0,
+): [number, number, number] {
   const m = fbm3(x * 8, y * 8, z * 8, SEED + 555, 3); // moisture-ish [-1,1]
 
   if (h < 0) {
@@ -86,15 +99,29 @@ export function terrainColor(x: number, y: number, z: number, h: number): [numbe
     const t = Math.min(-h / 3000, 1);
     return lerp3([0.12, 0.32, 0.42], [0.015, 0.06, 0.15], t);
   }
-  if (h < 12) return [0.76, 0.7, 0.5]; // beach
-  if (h > 3200 + 600 * m) return [0.93, 0.94, 0.96]; // snow
-  if (h > 1800 + 400 * m) return [0.45, 0.42, 0.4]; // rock
+
+  // temperature: 0 at tropics/sea level, 1 at poles or high altitude
+  const latRad = Math.asin(Math.min(Math.max(y, -1), 1));
+  const temp =
+    Math.abs(latRad) / (Math.PI / 2) * 0.85 + // latitude term (polar = 1)
+    h / 6000 * 0.9 -                            // lapse-rate term
+    m * 0.06;                                   // small weather wobble
+  const snowH = 3900 - temp * 2600;             // effective snowline (m)
+
+  if (h > snowH) return [0.93, 0.94, 0.96];     // snow / ice caps
+  if (slope > 0.55 || h > snowH * 0.72) return [0.45, 0.42, 0.4]; // bare rock
+
+  // tundra band just under the snowline
+  if (h > snowH * 0.55) return lerp3([0.5, 0.48, 0.34], [0.38, 0.44, 0.3], m * 0.5 + 0.5);
+
+  const dry = m < -0.15;
+  if (h < 12) return dry ? [0.72, 0.62, 0.36] : [0.76, 0.7, 0.5]; // beach
   if (h > 600) {
     // highland: green-brown blend by moisture
     return lerp3([0.3, 0.42, 0.2], [0.48, 0.45, 0.24], m * 0.5 + 0.5);
   }
   // lowland: desert -> grass -> forest by moisture
-  if (m < -0.25) return lerp3([0.72, 0.62, 0.36], [0.55, 0.55, 0.3], m + 0.5);
+  if (dry) return lerp3([0.72, 0.62, 0.36], [0.55, 0.55, 0.3], m + 0.5);
   return lerp3([0.28, 0.5, 0.22], [0.16, 0.36, 0.14], m * 0.5 + 0.5);
 }
 

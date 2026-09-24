@@ -22,6 +22,8 @@ export class CameraRig {
   currentSpeed = 0;
   speedMultiplier = 1;
   autoLevel = true;
+  /** Max auto-level correction speed, rad/s (a 180° half-roll takes ~1 s). */
+  private readonly LEVEL_RATE = 3;
 
   private boost = false;
   private pendingYaw = 0;
@@ -165,6 +167,13 @@ export class CameraRig {
     // (rightH -> 0) and the slerp would orbit the camera around the zenith
     // instead of letting it pass through. The zenith comes from a provider
     // because with a floating origin camera.position is frame-relative.
+    //
+    // Rate-limited: pitching THROUGH the zenith/nadir inherently leaves the
+    // camera 180° inverted relative to the horizon, so the level target right
+    // after exiting the skip cone can be a full half-roll away. Applying that
+    // with a plain exponential slerp reads as a sudden "clunk" flip; capping
+    // the correction speed turns it into a smooth deliberate roll while small
+    // errors still settle quickly.
     this.fwd.set(0, 0, -1).applyQuaternion(q);
     this.zenith.copy(this.getUp()).normalize();
     const hasZenith = this.zenith.lengthSq() > 0.5;
@@ -176,7 +185,11 @@ export class CameraRig {
         this.back.copy(this.fwd).negate();
         this.basisM.makeBasis(this.rightH, this.upH, this.back);
         this.levelQ.setFromRotationMatrix(this.basisM);
-        q.slerp(this.levelQ, 1 - Math.exp(-6 * dt));
+        const err = 2 * Math.acos(clamp(Math.abs(q.dot(this.levelQ)), 0, 1));
+        if (err > 1e-4) {
+          const t = Math.min(1, (this.LEVEL_RATE * dt) / err);
+          q.slerp(this.levelQ, t);
+        }
       }
     }
 
