@@ -45,8 +45,11 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
         // behind the horizon. No diagonal edges (quad grid, not triangles).
         if (uWire > 0.5) {
           vec2 gw = fwidth(vGrid) + 1e-6;
+          // fade lines out when grid cells drop below ~1px (grazing
+          // horizons would otherwise wash the surface white)
+          float fade = clamp((1.2 - max(gw.x, gw.y)) / 0.5, 0.0, 1.0);
           vec2 gf = abs(fract(vGrid - 0.5) - 0.5) / gw;
-          float line = 1.0 - clamp(min(gf.x, gf.y), 0.0, 1.0);
+          float line = (1.0 - clamp(min(gf.x, gf.y), 0.0, 1.0)) * fade;
           col = mix(col, vec3(0.95), line * 0.85);
         }
         gl_FragColor = vec4(col, 1.0);

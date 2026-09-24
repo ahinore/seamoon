@@ -13,6 +13,14 @@ export interface PlanetOptions {
   cacheSize?: number;
   /** Max tile builds per frame (synchronous in M1; moves to a Worker in M3). */
   buildBudget?: number;
+  /**
+   * Screen-footprint cap in pixels: a tile spanning more than this on screen
+   * is split regardless of curvature error. Keeps the region near the camera
+   * refined at grazing angles, where a smooth sphere has almost no sag error
+   * but terrain (Phase 3) will need real detail. Children halve their
+   * footprint per level, so the merge threshold (0.1*tau) stays chatter-free.
+   */
+  capPx?: number;
 }
 
 export interface LodStats {
@@ -41,6 +49,8 @@ interface QNode {
   nz: number;
   /** Geometric error (curvature sagitta) driving the split decision. */
   geomError: number;
+  /** Max edge length (m) — drives the screen-footprint split rule. */
+  edgeLen: number;
   children: QNode[] | null;
   tile: TileMesh | null;
   dead: boolean;
@@ -81,7 +91,7 @@ export class PlanetView {
   constructor(scene: THREE.Scene, radius: number, material: THREE.Material, opts: PlanetOptions = {}) {
     this.radius = radius;
     this.material = material;
-    this.o = { maxLevel: 20, tauPx: 2, res: 65, cacheSize: 300, buildBudget: 12, ...opts };
+    this.o = { maxLevel: 20, tauPx: 2, res: 65, cacheSize: 300, buildBudget: 12, capPx: 350, ...opts };
 
     // Roots are built synchronously so the planet exists from frame 1.
     for (let f = 0; f < 6; f++) {
@@ -140,6 +150,7 @@ export class PlanetView {
       ny: center.y / this.radius,
       nz: center.z / this.radius,
       geomError: (maxEdge * maxEdge) / (8 * this.radius),
+      edgeLen: maxEdge,
       children: null,
       tile: null,
       dead: false,
@@ -196,7 +207,12 @@ export class PlanetView {
     const height = relX * node.nx + relY * node.ny + relZ * node.nz;
     const dCenter = this.camPos.distanceTo(node.center);
     const d = Math.max(height, dCenter - node.boundRadius, 0.05);
-    const rho = (node.geomError / d) * this.pxPerUnit;
+    // Combined error: curvature sagitta in px, plus a screen-footprint term
+    // (tile edge in px, rescaled so exceeding capPx counts as tauPx error).
+    // Both are monotone in level, so the existing hysteresis stays valid.
+    const sagPx = (node.geomError / d) * this.pxPerUnit;
+    const edgePx = (node.edgeLen / d) * this.pxPerUnit;
+    const rho = Math.max(sagPx, (edgePx * this.o.tauPx) / this.o.capPx);
 
     if (node.children === null) {
       if (rho > this.o.tauPx && node.level < this.o.maxLevel) this.split(node);
