@@ -22,7 +22,7 @@ import { fbm3, ridged3 } from './noise';
 export const SEED = 1337;
 
 /** Max plausible elevation, used for color mapping and bounds. */
-export const MAX_ELEV = 5200;
+export const MAX_ELEV = 9200;
 
 export function terrainHeight(x: number, y: number, z: number): number {
   // continent mask: very low frequency, sharp-ish land/ocean split
@@ -41,8 +41,12 @@ export function terrainHeight(x: number, y: number, z: number): number {
   const py = y + wy * W;
   const pz = z + wz * W;
 
-  // mountain ranges: ridged noise, 320 km -> 10 km wavelengths
-  const m = ridged3(px * 20, py * 20, pz * 20, SEED + 77, 6);
+  // mountain ranges: ridged noise, 320 km -> 10 km wavelengths.
+  // Ridged noise is already crest-sharpening; squaring the ridge term
+  // narrows the crests further (Himalaya-like spine-and-valley profile)
+  // so a taller amplitude doesn't just look like inflated hills.
+  const mRaw = ridged3(px * 20, py * 20, pz * 20, SEED + 77, 6);
+  const m = mRaw * mRaw;
   const mountainMask = land * smoothstep(0.06, 0.38, c);
 
   // rolling hills: 40 km -> 2.5 km wavelengths, everywhere on land
@@ -60,14 +64,16 @@ export function terrainHeight(x: number, y: number, z: number): number {
   const f = fbm3(px * 2560, py * 2560, pz * 2560, SEED + 313, 4);
   const erosion = 1 - 0.75 * mountainMask * m;
 
-  // ocean floor: gentle negative relief
-  const ocean = -900 - 2200 * smoothstep(0.0, -0.6, c);
+  // ocean floor: gentle negative relief, with hadal trenches in the deep
+  // basins (ridged noise carves long narrow trenches ~10 km deep)
+  const trench = ridged3(px * 14, py * 14, pz * 14, SEED + 611, 4);
+  const ocean = -900 - 2600 * smoothstep(0.0, -0.6, c) - 6500 * smoothstep(0.55, 0.95, trench);
 
   const landElev =
     60 * land +                        // coastal plains baseline
-    3800 * mountainMask * m +          // mountain ranges
-    500 * d * land +                   // hills
-    340 * g * land +                   // foothills / medium relief
+    8200 * mountainMask * m +          // mountain ranges (Everest-class)
+    700 * d * land +                   // hills
+    420 * g * land +                   // foothills / medium relief
     160 * f * land * erosion;          // fine roughness, damped on ridges
 
   return land * landElev + (1 - land) * ocean;
