@@ -84,7 +84,7 @@ export function buildTileGeometry(
   const positions = new Float32Array(nu * nu * 3);
   const normals = new Float32Array(nu * nu * 3);
   const centers = new Float32Array(nu * nu * 3);
-  const grids = new Float32Array(nu * nu * 2);
+  const grids = new Float32Array(nu * nu * 3);
 
   let ptr = 0;
   let gptr = 0;
@@ -107,11 +107,12 @@ export function buildTileGeometry(
       centers[ptr] = dir.x * radius - center.x;
       centers[ptr + 1] = dir.y * radius - center.y;
       centers[ptr + 2] = dir.z * radius - center.z;
-      // grid coordinates for shader-drawn wireframe lines
+      // grid coordinates + skirt flag for shader-drawn wireframe
       grids[gptr] = ii;
       grids[gptr + 1] = jj;
+      grids[gptr + 2] = skirt ? 1 : 0;
       ptr += 3;
-      gptr += 2;
+      gptr += 3;
     }
   }
 
@@ -133,7 +134,7 @@ export function buildTileGeometry(
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
   geometry.setAttribute('center', new THREE.BufferAttribute(centers, 3));
-  geometry.setAttribute('aGrid', new THREE.BufferAttribute(grids, 2));
+  geometry.setAttribute('aGrid', new THREE.BufferAttribute(grids, 3));
   geometry.setIndex(new THREE.BufferAttribute(idx, 1));
   geometry.computeBoundingSphere();
 

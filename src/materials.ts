@@ -17,10 +17,10 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
     vertexShader: /* glsl */ `
       #include <common>
       attribute vec3 center;
-      attribute vec2 aGrid;
+      attribute vec3 aGrid;
       varying vec3 vN;
       varying vec3 vC;
-      varying vec2 vGrid;
+      varying vec3 vGrid;
       void main() {
         vN = normalize(mat3(modelMatrix) * normal);
         vC = center;
@@ -35,21 +35,28 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uniform float uWire;
       varying vec3 vN;
       varying vec3 vC;
-      varying vec2 vGrid;
+      varying vec3 vGrid;
       void main() {
         float ndl = clamp(dot(normalize(vN), uSunDir), 0.0, 1.0);
         vec3 col = uBase * (0.05 + 0.95 * ndl);
-        // Wireframe overlay drawn IN the surface shader: 1-px grid lines via
-        // screen-space derivatives. Only front faces exist here (solid pass),
-        // so no back-face edges, and the sphere's own depth test hides lines
-        // behind the horizon. No diagonal edges (quad grid, not triangles).
+        // Wireframe overlay drawn IN the surface shader (front faces only,
+        // depth-tested). Two layers:
+        //  - tile boundary lines: always (1 px), uniform at every LOD level
+        //  - interior cell grid: only when a cell spans >= ~4 px on screen,
+        //    fading out below that — the 1-3 px band would alias into moire
+        // Skirt vertices (vGrid.z = 1) never get lines (they would read as
+        // bright walls at grazing angles).
         if (uWire > 0.5) {
-          vec2 gw = fwidth(vGrid) + 1e-6;
-          // fade lines out when grid cells drop below ~1px (grazing
-          // horizons would otherwise wash the surface white)
-          float fade = clamp((1.2 - max(gw.x, gw.y)) / 0.5, 0.0, 1.0);
-          vec2 gf = abs(fract(vGrid - 0.5) - 0.5) / gw;
-          float line = (1.0 - clamp(min(gf.x, gf.y), 0.0, 1.0)) * fade;
+          float fx = fwidth(vGrid.x) + 1e-6;
+          float fy = fwidth(vGrid.y) + 1e-6;
+          // tile boundary: distance to the tile edge in grid units
+          float b = min(min(vGrid.x, 64.0 - vGrid.x), min(vGrid.y, 64.0 - vGrid.y));
+          float boundary = 1.0 - clamp(min(b / fx, b / fy), 0.0, 1.0);
+          // interior grid at integer lines, anti-aliased via fwidth
+          vec2 gf = abs(fract(vGrid.xy - 0.5) - 0.5);
+          float grid = 1.0 - clamp(min(gf.x / fx, gf.y / fy), 0.0, 1.0);
+          float fade = clamp((0.25 - max(fx, fy)) / 0.125, 0.0, 1.0);
+          float line = max(boundary, grid * fade) * (1.0 - vGrid.z);
           col = mix(col, vec3(0.95), line * 0.85);
         }
         gl_FragColor = vec4(col, 1.0);
