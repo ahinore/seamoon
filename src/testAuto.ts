@@ -35,6 +35,11 @@ export class AutoPilot {
   private h0 = 0;
   private orbitAngle = 0;
   private readonly world: WorldOrigin;
+  // Session spawn pose (absolute), captured after the constructor places the
+  // camera — H ("home") restores exactly this spot and nadir orientation,
+  // through any number of floating-origin rebases (stored absolute).
+  private readonly homePos = new THREE.Vector3();
+  private readonly homeQ = new THREE.Quaternion();
 
   constructor(rig: CameraRig, world: WorldOrigin) {
     const q = new URLSearchParams(location.search);
@@ -62,6 +67,21 @@ export class AutoPilot {
     rig.camera.position.copy(pos);
     rig.camera.up.set(0, 1, 0);
     rig.camera.lookAt(0, 0, 0);
+    // Remember the spawn pose for the H (home) key. lookAt leaves the camera's
+    // up ~ +Y; for lat=±90 the spawn up is degenerate, so rebuild it the same
+    // way place() does (world +Y as the reference up).
+    this.homePos.copy(pos);
+    this.homeQ.copy(rig.camera.quaternion);
+  }
+
+  /** Teleport back to the session spawn pose (position + orientation). */
+  goHome(rig: CameraRig): void {
+    rig.camera.position.copy(this.world.rel(this.homePos, _pos));
+    rig.camera.quaternion.copy(this.homeQ);
+    rig.clearPendingTurn();
+    // Pending autopilot phases keep running in other modes; for hover the
+    // phase is already 'done', and drop/bounce re-place the camera next step
+    // anyway. Position correctness does not depend on them.
   }
 
   /** @returns HUD status line, or null when inactive */

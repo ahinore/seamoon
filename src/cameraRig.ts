@@ -136,6 +136,12 @@ export class CameraRig {
     this.pendingPitch += pitch;
   }
 
+  /** Drop accumulated (not yet applied) view-relative turns. */
+  clearPendingTurn(): void {
+    this.pendingYaw = 0;
+    this.pendingPitch = 0;
+  }
+
   update(dt: number): void {
     const k = this.keys;
     // Arrow keys feed the same accumulator as the mouse.

@@ -107,6 +107,13 @@ window.addEventListener('keydown', (e) => {
     // visible surface only — no back-face edges, no diagonal clutter).
     material.uniforms.uWire.value = material.uniforms.uWire.value > 0.5 ? 0 : 1;
   }
+  if (e.code === 'KeyH') {
+    // Home: teleport back to the session spawn position/orientation. The
+    // spawn pose is stored in ABSOLUTE coordinates, so this is exact no
+    // matter how many floating-origin rebases happened since.
+    auto.goHome(rig);
+    world.abs(rig.camera.position, absCam);
+  }
 });
 
 // test hook: force wireframe from URL for automated runs
