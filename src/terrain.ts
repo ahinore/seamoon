@@ -106,13 +106,16 @@ export function terrainColor(
     return lerp3([0.12, 0.32, 0.42], [0.015, 0.06, 0.15], t);
   }
 
-  // temperature: 0 at tropics/sea level, 1 at poles or high altitude
+  // temperature: 0 at tropics/sea level, 1 at poles or high altitude.
+  // Latitude dominates via a power curve; the lapse-rate term puts alpine
+  // snowlines on tall ranges. At lat 72+ snowH <= 0 -> permanent ice caps;
+  // high relief snows from ~2.9 km at mid latitudes, ~1 km at lat 60.
   const latRad = Math.asin(Math.min(Math.max(y, -1), 1));
   const temp =
-    Math.abs(latRad) / (Math.PI / 2) * 0.85 + // latitude term (polar = 1)
-    h / 6000 * 0.9 -                            // lapse-rate term
-    m * 0.06;                                   // small weather wobble
-  const snowH = 3900 - temp * 2600;             // effective snowline (m)
+    Math.pow(Math.abs(latRad) / (Math.PI / 2), 0.62) * 1.3 + // latitude term
+    h / 6000 * 0.55 -                                         // lapse-rate term
+    m * 0.06;                                                 // weather wobble
+  const snowH = 2900 - temp * 3000;                           // snowline (m)
 
   if (h > snowH) return [0.93, 0.94, 0.96];     // snow / ice caps
   if (slope > 0.55 || h > snowH * 0.72) return [0.45, 0.42, 0.4]; // bare rock
