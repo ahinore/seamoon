@@ -48,11 +48,16 @@ export function terrainHeight(x: number, y: number, z: number): number {
   // rolling hills: 40 km -> 2.5 km wavelengths, everywhere on land
   const d = fbm3(px * 160, py * 160, pz * 160, SEED + 191, 5);
 
-  // fine detail: 4 km -> 500 m wavelengths (matters below ~30 km altitude).
+  // medium relief: 6 km -> 780 m wavelengths — the "foothill" band. Real
+  // ranges are mostly foothills, not bare peaks; this octave carries most
+  // of the visual texture seen from 1-20 km altitude.
+  const g = fbm3(px * 1050, py * 1050, pz * 1050, SEED + 417, 4);
+
+  // fine detail: 2.5 km -> 310 m wavelengths (matters below ~30 km altitude).
   // Slope/erosion damping: ridges are steep, and steep young relief carries
   // less fine sediment — attenuate the fine octave on high ridges. Cheap
   // stand-in for real erosion until Phase 10.
-  const f = fbm3(px * 1600, py * 1600, pz * 1600, SEED + 313, 4);
+  const f = fbm3(px * 2560, py * 2560, pz * 2560, SEED + 313, 4);
   const erosion = 1 - 0.75 * mountainMask * m;
 
   // ocean floor: gentle negative relief
@@ -62,6 +67,7 @@ export function terrainHeight(x: number, y: number, z: number): number {
     60 * land +                        // coastal plains baseline
     3800 * mountainMask * m +          // mountain ranges
     500 * d * land +                   // hills
+    340 * g * land +                   // foothills / medium relief
     160 * f * land * erosion;          // fine roughness, damped on ridges
 
   return land * landElev + (1 - land) * ocean;
