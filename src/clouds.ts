@@ -119,14 +119,25 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
       // ONE function drives the volumetric march. billowed (1-|2x-1|) fbm
       // gives rounded, overlapping puffs; the coverage threshold picks the
       // peaks; the weather field gates clusters (systems, not a carpet).
-      float cloudDensity(vec3 p, float cover, float weather, float t2, float edge) {
-        vec3 pw = p * (1.0 / 3000.0); // puff cells ~3 km
+      float cloudDensity(vec3 p, float cover, float weather, float t2, float edge, float cs) {
+        // cs = distance-LOD cell multiplier (>=1). Far march samples evaluate a
+        // COARSER field: the 0.6-1.4 km fbm octaves alias into grainy fuzz
+        // when a 3 km puff is only a few pixels on screen (same idea as the
+        // terrain mesh's octave fade).
+        vec3 pw = p / (3000.0 * cs); // puff cells ~3 km near, coarser far
         float f1 = fbm3o(pw + vec3(t2, t2 * 1.3, -t2));
         float billow = 1.0 - abs(2.0 * f1 - 1.0); // rounded blobs [0,1]
         float thr = mix(0.30, -0.10, cover);
         float d = smoothstep(thr, thr + edge, billow * (0.55 + 0.45 * cover));
         d = clamp(d * 1.35, 0.0, 1.0);
-        d *= smoothstep(0.42, 0.62, weather);
+        // Cluster gate: the old smoothstep(0.42,0.62) was so tight that only
+        // isolated weather-field speckles passed — clouds read as mottled
+        // fuzz instead of coherent systems. The wide gate grows proper
+        // clusters; below it a thin sparse haze (0.12x) keeps clear skies
+        // limited to the genuinely dry weather troughs.
+        float gate = max(smoothstep(0.40, 0.58, weather),
+                         0.12 * smoothstep(0.15, 0.35, weather));
+        d *= gate;
         return d;
       }
 
@@ -198,9 +209,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
               float h = clamp((r - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
                               ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)}, 0.0, 1.0);
               // ---- unified density: same function the far shell shows ----
-              float d = cloudDensity(p, cover, weather, t2, 0.18);
-              // edge erosion: high-frequency wisps carve the surface
-              float hf = fbm3o(p * (1.0 / 640.0) + vec3(-t2 * 1.7, t2, t2 * 0.8));
+              // Distance-LOD: samples far along the ray use a coarser field
+              // (cs = 1 + t/15km), killing subpixel puff aliasing.
+              float cs = 1.0 + t * (1.0 / 15000.0);
+              float d = cloudDensity(p, cover, weather, t2, 0.18, cs);
+              // edge erosion: high-frequency wisps carve the surface (fades
+              // out with distance LOD so far samples stay smooth)
+              float hf = fbm3o(p * (1.0 / (640.0 * cs)) + vec3(-t2 * 1.7, t2, t2 * 0.8));
               d -= (1.0 - d) * hf * 0.35;
               // vertical shaping: rounded bases, domed tops
               d *= smoothstep(0.0, 0.18, h) * (0.55 + 0.45 * smoothstep(1.0, 0.55, h));
