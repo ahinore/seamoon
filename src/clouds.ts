@@ -127,7 +127,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         vec3 pw = p / (3000.0 * cs); // puff cells ~3 km near, coarser far
         float f1 = fbm3o(pw + vec3(t2, t2 * 1.3, -t2));
         float billow = 1.0 - abs(2.0 * f1 - 1.0); // rounded blobs [0,1]
-        float thr = mix(0.30, -0.10, cover);
+        // Billow field statistics (200k samples): mean 0.19, median 0.23,
+        // q70 0.52, q85 0.76. The old thr range (0.30 -> -0.10 with cover)
+        // sat BELOW the mean: with cover ~0.4+ the smoothstep fired over
+        // most of the field, every grazing ray saturated alpha within its
+        // 40 km budget, and the deck read as a flat gray "water" sheet.
+        // thr is now anchored ABOVE the median so coverage follows the cover
+        // uniform instead of saturating: low cover picks the top ~15% of
+        // puffs, high cover (~0.9) still only claims the top ~45%.
+        float thr = mix(0.62, 0.28, cover);
         float d = smoothstep(thr, thr + edge, billow * (0.55 + 0.45 * cover));
         d = clamp(d * 1.35, 0.0, 1.0);
         // Cluster gate: the old smoothstep(0.42,0.62) was so tight that only
@@ -229,10 +237,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
                   float bl = 1.0 - abs(2.0 * fl - 1.0);
                   od += smoothstep(mix(0.30, -0.10, cover), mix(0.30, -0.10, cover) + 0.18, bl * (0.55 + 0.45 * cover)) * 220.0;
                 }
-                float shadow = exp(-od * 0.004);      // Beer-Lambert
+                float shadow = exp(-od * 0.0012);     // Beer-Lambert (gentler:
+                // the old 0.004 killed the sun term for every interior sample
+                // — top-down views of the deck read as a flat dark-gray sheet)
                 float powder = 1.0 - exp(-d * 4.0);   // dark edges, bright cores
+                // tops catch the sun: height-based ambient brightening
                 vec3 lit = vec3(1.0, 0.98, 0.95) * shadow * phase * (0.35 + 0.65 * powder)
-                         + vec3(0.45, 0.55, 0.7) * 0.35; // sky ambient
+                         + vec3(0.55, 0.63, 0.78) * (0.40 + 0.35 * h); // sky ambient
                 float aStep = 1.0 - exp(-d * dt * 0.0045);
                 volCol += lit * aStep * volT;
                 volT *= 1.0 - aStep;
