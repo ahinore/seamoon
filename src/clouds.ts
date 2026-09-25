@@ -119,6 +119,25 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         return vec2(-b - h, -b + h);
       }
 
+      // ---- unified cloud density ---------------------------------------
+      // ONE function drives both the far shell pattern and the near
+      // volumetric march, evaluated at the same planet-frame positions, so
+      // approaching the layer morphs the SAME clouds instead of swapping
+      // representations (the old far pattern vanished on approach and read
+      // as fake continents from orbit). The wide edge smooths sub-pixel
+      // puffs at distance instead of aliasing into streaks.
+      float cloudDensity(vec3 p, float cover, float weather, float t2, float edge) {
+        vec3 pw = p * (1.0 / 3000.0); // puff cells ~3 km
+        float f1 = fbm3o(pw + vec3(t2, t2 * 1.3, -t2));
+        float billow = 1.0 - abs(2.0 * f1 - 1.0); // rounded blobs [0,1]
+        float thr = mix(0.30, -0.10, cover);
+        float d = smoothstep(thr, thr + edge, billow * (0.55 + 0.45 * cover));
+        d = clamp(d * 1.35, 0.0, 1.0);
+        // cluster gate: systems, not a global carpet
+        d *= smoothstep(0.42, 0.62, weather);
+        return d;
+      }
+
       void main() {
         vec3 pc = -uOrigin;
         vec3 ro = uCamPos - pc;      // ray origin in planet frame
@@ -140,18 +159,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         cover = pow(cover, 0.7); // bias toward more visible coverage
 
         // ================= 2D shell path (far view) ====================
-        vec3 dq = upF * 40.0; // detail scale ~ R/40 (~160 km cells)
         float t2 = uTime * 0.006;
-        float detail = fbm4(dq + vec3(t2, t2 * 1.3, -t2) + weather * 1.5);
-        // threshold the DETAIL field directly (mean ~0.47, range ~[0.05,0.9]):
-        // low cover -> only noise peaks become cloud; high cover -> broad deck.
-        // (Thresholding detail-minus-0.47 against ~0 made nearly the whole
-        // planet cloudy — the gray-carpet bug.)
-        float thr2d = mix(0.80, 0.42, cover);
-        float shellDensity = smoothstep(thr2d, thr2d + 0.14, detail);
-        shellDensity = clamp(shellDensity * 1.3, 0.0, 1.0);
-        // cluster gate: puffs appear inside weather systems, blue sky between
-        shellDensity *= smoothstep(0.42, 0.62, weather);
+        // The shell shows the SAME density field the volumetric path
+        // marches, sampled at the fragment's own position on the shell
+        // (mid-layer). Wide smoothstep edge = distance anti-aliasing.
+        float distFrag = length(uCamPos - vWorld);
+        float edge = mix(0.30, 0.65, clamp(distFrag / 2.0e6, 0.0, 1.0));
+        float shellDensity = cloudDensity(vWorld - pc, cover, weather, t2, edge);
         // vertical profile: puffy middle, wispy top/bottom
         shellDensity *= 0.65 + 0.35 * sin(hLayer * 3.14159);
 
@@ -201,7 +215,6 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
             t1 = min(t1, t0 + 40000.0);
             float dt = (t1 - t0) / float(steps);
             float t = t0 + dt * 0.5;
-            float thr = mix(0.30, -0.10, cover);
             float phase = 0.35 + 0.65 * pow(clamp(dot(rd, uSunDir) * 0.5 + 0.5, 0.0, 1.0), 2.0);
             for (int i = 0; i < MAX_STEPS; i++) {
               if (i >= steps) break;
@@ -209,19 +222,10 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
               float r = length(p);
               float h = clamp((r - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
                               ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)}, 0.0, 1.0);
-              // ---- metaball-ish puff field ----
-              // puff cells ~3 km (1 noise unit = 3000 m); fbm adds detail
-              // down to ~640 m. Planet-frame position keeps the field
-              // anchored to the ground (no swimming with the camera).
-              vec3 pw = p * (1.0 / 3000.0);
-              float f1 = fbm3o(pw + vec3(t2, t2 * 1.3, -t2));
-              float billow = 1.0 - abs(2.0 * f1 - 1.0); // rounded blobs [0,1]
-              float d = smoothstep(thr, thr + 0.18, billow * (0.55 + 0.45 * cover));
-              d = clamp(d * 1.35, 0.0, 1.0); // keep puffs opaque at 18 steps
-              // cluster gate (same as shell path): systems, not global carpet
-              d *= smoothstep(0.42, 0.62, weather);
+              // ---- unified density: same function the far shell shows ----
+              float d = cloudDensity(p, cover, weather, t2, 0.18);
               // edge erosion: high-frequency wisps carve the surface
-              float hf = fbm3o(pw * 4.7 + vec3(-t2 * 1.7, t2, t2 * 0.8));
+              float hf = fbm3o(p * (1.0 / 640.0) + vec3(-t2 * 1.7, t2, t2 * 0.8));
               d -= (1.0 - d) * hf * 0.35;
               // vertical shaping: rounded bases, domed tops
               d *= smoothstep(0.0, 0.18, h) * (0.55 + 0.45 * smoothstep(1.0, 0.55, h));
@@ -233,7 +237,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
                   vec3 pl = p + uSunDir * (float(j) * 220.0);
                   float fl = fbm3o(pl * (1.0 / 3000.0) + vec3(t2, t2 * 1.3, -t2));
                   float bl = 1.0 - abs(2.0 * fl - 1.0);
-                  od += smoothstep(thr, thr + 0.18, bl * (0.55 + 0.45 * cover)) * 220.0;
+                  od += smoothstep(mix(0.30, -0.10, cover), mix(0.30, -0.10, cover) + 0.18, bl * (0.55 + 0.45 * cover)) * 220.0;
                 }
                 float shadow = exp(-od * 0.004);      // Beer-Lambert
                 float powder = 1.0 - exp(-d * 4.0);   // dark edges, bright cores
