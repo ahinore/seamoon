@@ -94,9 +94,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
               mix(hash13(i + vec3(0,1,1)), hash13(i + vec3(1,1,1)), f.x), f.y),
           f.z);
       }
-      float fbm3o(vec3 p) {
+      float fbm3o(vec3 p, float detail) {
+        // detail fades the 3rd octave's amplitude (LOD) instead of rescaling
+        // the lattice: rescaling planet-frame coordinates per pixel jumps the
+        // noise grid by whole cells -> concentric ripple rings. Amplitude
+        // fade is continuous in the fade value, so it cannot ring.
         float a = 0.5, s = 0.0;
-        for (int i = 0; i < 3; i++) { s += a * noise3(p); p *= 2.17; a *= 0.5; }
+        s += a * noise3(p); p *= 2.17; a *= 0.5;
+        s += a * noise3(p); p *= 2.17; a *= 0.5 * detail;
+        s += a * noise3(p);
         return s;
       }
       float fbm4(vec3 p) {
@@ -119,13 +125,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
       // ONE function drives the volumetric march. billowed (1-|2x-1|) fbm
       // gives rounded, overlapping puffs; the coverage threshold picks the
       // peaks; the weather field gates clusters (systems, not a carpet).
-      float cloudDensity(vec3 p, float cover, float weather, float t2, float edge, float cs) {
-        // cs = distance-LOD cell multiplier (>=1). Far march samples evaluate a
-        // COARSER field: the 0.6-1.4 km fbm octaves alias into grainy fuzz
-        // when a 3 km puff is only a few pixels on screen (same idea as the
-        // terrain mesh's octave fade).
-        vec3 pw = p / (3000.0 * cs); // puff cells ~3 km near, coarser far
-        float f1 = fbm3o(pw + vec3(t2, t2 * 1.3, -t2));
+      float cloudDensity(vec3 p, float cover, float weather, float t2, float edge, float detail) {
+        vec3 pw = p * (1.0 / 3000.0); // puff cells ~3 km
+        float f1 = fbm3o(pw + vec3(t2, t2 * 1.3, -t2), detail);
         float billow = 1.0 - abs(2.0 * f1 - 1.0); // rounded blobs [0,1]
         // Billow field statistics (200k samples): mean 0.19, median 0.23,
         // q70 0.52, q85 0.76. The old thr range (0.30 -> -0.10 with cover)
@@ -205,13 +207,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
             int steps = int(clamp(uVolSteps, 4.0, 28.0));
             // cap the marched path: grazing rays through the slab would
             // accumulate alpha=1 over hundreds of km and read as a gray
-            // wall. 40 km keeps distant air hazy instead of solid.
-            t1 = min(t1, t0 + 40000.0);
+            // wall. 18 km keeps distant air hazy instead of solid, and the
+            // shorter path doubles the effective step density (fewer
+            // aliasing artifacts on grazing views).
+            t1 = min(t1, t0 + 18000.0);
             float dt = (t1 - t0) / float(steps);
-            // Dither the march start (blue-noise-ish hash of the pixel +
-            // frame): uniform steps quantize smooth density fields into
-            // visible concentric banding — the "ripple rings" artifact.
-            float jit = hash13(vec3(gl_FragCoord.xy, fract(uTime) * 113.0));
+            // Static dither (Interleaved Gradient Noise, Jimenez'): breaks
+            // the concentric step-quantization bands of a uniform march.
+            // Frame-varying jitter was tried and reads as boiling noise;
+            // IGN is screen-stable and decorrelates neighbors cleanly.
+            float jit = fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x
+                        + 0.00583715 * gl_FragCoord.y));
             float t = t0 + dt * jit;
             float phase = 0.35 + 0.65 * pow(clamp(dot(rd, uSunDir) * 0.5 + 0.5, 0.0, 1.0), 2.0);
             for (int i = 0; i < MAX_STEPS; i++) {
@@ -220,16 +226,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
               float r = length(p);
               float h = clamp((r - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
                               ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)}, 0.0, 1.0);
-              // Distance-LOD: the field granularity is chosen ONCE per ray
-              // from the ray's slab-entry distance — per-step values would
-              // quantize the march into concentric rings (visible ripple
-              // bands on grazing views).
-              float cs = 1.0 + min(t0, 40000.0) * (1.0 / 15000.0);
+              // Detail LOD: fade the 3rd fbm octave with distance INSTEAD of
+              // rescaling the lattice (rescaling planet-frame coords per
+              // pixel jumps the noise grid by whole cells -> the concentric
+              // "ripple rings" seen when approaching the deck). h grows with
+              // sample distance, so the fade is smooth along the ray too.
+              float detail = 1.0 / (1.0 + t * (1.0 / 8000.0));
               // ---- unified density: same function the far shell shows ----
-              float d = cloudDensity(p, cover, weather, t2, 0.18, cs);
+              float d = cloudDensity(p, cover, weather, t2, 0.18, detail);
               // edge erosion: high-frequency wisps carve the surface (fades
-              // out with distance LOD so far samples stay smooth)
-              float hf = fbm3o(p * (1.0 / (640.0 * cs)) + vec3(-t2 * 1.7, t2, t2 * 0.8));
+              // out with distance so far samples stay smooth)
+              float hf = fbm3o(p * (1.0 / 640.0) + vec3(-t2 * 1.7, t2, t2 * 0.8), detail * detail);
               d -= (1.0 - d) * hf * 0.35;
               // vertical shaping: rounded bases, domed tops
               d *= smoothstep(0.0, 0.18, h) * (0.55 + 0.45 * smoothstep(1.0, 0.55, h));
@@ -239,9 +246,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
                 float od = 0.0;
                 for (int j = 1; j <= 3; j++) {
                   vec3 pl = p + uSunDir * (float(j) * 220.0);
-                  float fl = fbm3o(pl * (1.0 / 3000.0) + vec3(t2, t2 * 1.3, -t2));
+                  float fl = fbm3o(pl * (1.0 / 3000.0) + vec3(t2, t2 * 1.3, -t2), 1.0);
                   float bl = 1.0 - abs(2.0 * fl - 1.0);
-                  od += smoothstep(mix(0.30, -0.10, cover), mix(0.30, -0.10, cover) + 0.18, bl * (0.55 + 0.45 * cover)) * 220.0;
+                  // same threshold family as cloudDensity (thr = mix(0.70,0.36)):
+                  // the stale low threshold here made shadowing fire almost
+                  // everywhere, flattening the deck's shading
+                  float thrS = mix(0.70, 0.36, cover);
+                  od += smoothstep(thrS, thrS + 0.18, bl * (0.55 + 0.45 * cover)) * 220.0;
                 }
                 float shadow = exp(-od * 0.0012);     // Beer-Lambert (gentler:
                 // the old 0.004 killed the sun term for every interior sample
