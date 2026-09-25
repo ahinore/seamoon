@@ -116,12 +116,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
       }
 
       // ---- unified cloud density ---------------------------------------
-      // ONE function drives both the far shell pattern and the near
-      // volumetric march, evaluated at the same planet-frame positions, so
-      // approaching the layer morphs the SAME clouds instead of swapping
-      // representations (the old far pattern vanished on approach and read
-      // as fake continents from orbit). The wide edge smooths sub-pixel
-      // puffs at distance instead of aliasing into streaks.
+      // ONE function drives the volumetric march. billowed (1-|2x-1|) fbm
+      // gives rounded, overlapping puffs; the coverage threshold picks the
+      // peaks; the weather field gates clusters (systems, not a carpet).
       float cloudDensity(vec3 p, float cover, float weather, float t2, float edge) {
         vec3 pw = p * (1.0 / 3000.0); // puff cells ~3 km
         float f1 = fbm3o(pw + vec3(t2, t2 * 1.3, -t2));
@@ -129,7 +126,6 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         float thr = mix(0.30, -0.10, cover);
         float d = smoothstep(thr, thr + edge, billow * (0.55 + 0.45 * cover));
         d = clamp(d * 1.35, 0.0, 1.0);
-        // cluster gate: systems, not a global carpet
         d *= smoothstep(0.42, 0.62, weather);
         return d;
       }
