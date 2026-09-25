@@ -22,12 +22,19 @@ export class CameraRig {
   currentSpeed = 0;
   speedMultiplier = 1;
   autoLevel = true;
+  /** Flight-mode stick deflections (-1..1, spring-centered). FlightModel reads. */
+  readonly ctl = { pitch: 0, roll: 0, yaw: 0 };
+  /** When true, update() drives the flight stick instead of the free camera. */
+  stickMode = false;
   /** Max auto-level correction speed, rad/s (a 180° half-roll takes ~1 s). */
   private readonly LEVEL_RATE = 3;
 
   private boost = false;
   private pendingYaw = 0;
   private pendingPitch = 0;
+  /** Unconsumed mouse deltas feeding the flight stick. */
+  private stickDx = 0;
+  private stickDy = 0;
   private readonly keys = new Set<string>();
   private readonly el: HTMLElement;
   private readonly getAltitude: () => number;
@@ -73,6 +80,11 @@ export class CameraRig {
     });
     document.addEventListener('mousemove', (ev) => {
       if (!this.mouseLocked) return;
+      if (this.stickMode) {
+        this.stickDx += ev.movementX;
+        this.stickDy += ev.movementY;
+        return;
+      }
       this.pendingYaw -= ev.movementX * 0.0022;
       this.pendingPitch -= ev.movementY * 0.0022;
     });
@@ -142,8 +154,31 @@ export class CameraRig {
     this.pendingPitch = 0;
   }
 
+  /** Key-down test for the flight model (throttle/brake reads). */
+  isDown(code: string): boolean {
+    return this.keys.has(code);
+  }
+
   update(dt: number): void {
     const k = this.keys;
+    if (this.stickMode) {
+      // Flight mode: mouse/arrows deflect the stick (spring-centered), no
+      // camera motion here — FlightModel.step() owns the pose.
+      const rate = 2.2 * dt;
+      const d = (v: number, inc: boolean, dec: boolean) =>
+        clamp(v + (inc ? rate : 0) - (dec ? rate : 0), -1, 1);
+      if (this.mouseLocked) {
+        this.ctl.pitch = clamp(this.ctl.pitch - this.stickDy * 0.06, -1, 1);
+        this.ctl.roll = clamp(this.ctl.roll - this.stickDx * 0.06, -1, 1);
+        this.stickDx = 0;
+        this.stickDy = 0;
+      }
+      this.ctl.pitch = d(this.ctl.pitch, k.has('ArrowUp'), k.has('ArrowDown'));
+      this.ctl.roll = d(this.ctl.roll, k.has('ArrowLeft'), k.has('ArrowRight'));
+      this.ctl.yaw = d(this.ctl.yaw, k.has('KeyA'), k.has('KeyD'));
+      this.currentSpeed = 0;
+      return;
+    }
     // Arrow keys feed the same accumulator as the mouse.
     const turn = 1.5 * dt;
     if (k.has('ArrowLeft')) this.pendingYaw += turn;

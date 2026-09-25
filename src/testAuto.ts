@@ -27,6 +27,14 @@ const PLANET_R = 6_371_000;
  */
 export class AutoPilot {
   readonly mode: string;
+  /** Flight mode suspends the test driver (the aircraft owns the pose). */
+  private suspended = false;
+  suspend(): void {
+    this.suspended = true;
+  }
+  resume(): void {
+    this.suspended = false;
+  }
   private readonly alt0: number;
   private readonly alt1: number;
   private phase: 'descend' | 'ascend' | 'done' = 'descend';
@@ -107,7 +115,7 @@ export class AutoPilot {
 
   /** @returns HUD status line, or null when inactive */
   update(rig: CameraRig, dt: number): string | null {
-    if (!this.mode) return null;
+    if (!this.mode || this.suspended) return null;
     if (this.phase === 'done') return `autopilot:${this.mode} done`;
 
     const planetR = PLANET_R;

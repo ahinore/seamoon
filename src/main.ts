@@ -5,6 +5,7 @@ import { makePlanetMaterial, makeStars } from './materials';
 import { makeAtmosphereMesh, makeAtmosphereUniforms } from './atmosphere';
 import { Hud } from './hud';
 import { AutoPilot } from './testAuto';
+import { FlightModel } from './flight';
 import { WorldOrigin } from './world';
 
 const R = 6_371_000; // Earth radius, meters
@@ -149,6 +150,34 @@ const fmtDist = (m: number): string =>
   m >= 1e6 ? (m / 1e6).toFixed(2) + ' Mm' : m >= 1e4 ? (m / 1e3).toFixed(1) + ' km' : m.toFixed(1) + ' m';
 
 const auto = new AutoPilot(rig, world);
+
+// Phase 6: flight model. F toggles between the free camera and the aircraft
+// (?demo=fly starts in the aircraft with the scripted takeoff->landing
+// mission). In flight mode the autopilot test driver is disabled.
+const flight = new FlightModel(rig, world);
+if (flight.mode === 'fly') {
+  rig.stickMode = true;
+  auto.suspend();
+}
+
+/** Switch free-camera <-> aircraft (F key). */
+function toggleFlight(): void {
+  if (rig.stickMode) {
+    // exit to free camera at the current pose
+    rig.stickMode = false;
+    rig.ctl.pitch = rig.ctl.roll = rig.ctl.yaw = 0;
+    auto.resume();
+  } else {
+    flight.reset();
+    rig.stickMode = true;
+    auto.suspend();
+  }
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'KeyF' && !e.repeat) toggleFlight();
+  if (e.code === 'KeyR' && rig.stickMode && !e.repeat) flight.reset();
+});
 
 // Demo-only pixel probe: samples rendered colors so automated verification can
 // confirm actual pixels (e.g. planet lit vs. sky), not just stats. null = off.
@@ -296,9 +325,15 @@ renderer.setAnimationLoop(() => {
     // (the rig moves the camera; the autopilot may also teleport it).
     world.abs(rig.camera.position, absCam);
 
-    rig.update(dt);
-    autoLine = auto.update(rig, dt);
-    world.abs(rig.camera.position, absCam);
+    if (rig.stickMode) {
+      rig.update(dt);
+      flight.step(dt);
+      world.abs(rig.camera.position, absCam);
+    } else {
+      rig.update(dt);
+      autoLine = auto.update(rig, dt);
+      world.abs(rig.camera.position, absCam);
+    }
 
     // Floating-origin rebase: recenters the frame origin onto the camera.
     // Only frame-relative values shift; absolute bookkeeping is untouched.
@@ -334,6 +369,7 @@ renderer.setAnimationLoop(() => {
   hud.update([
     ...errors.slice(-3),
     ...(autoLine ? [autoLine] : []),
+    ...(rig.stickMode ? [flight.statusLine()] : []),
     ...(speedup > 1 ? [`speedup x${speedup}`] : []),
     ...(rebased > 0 ? [`rebase x${rebased} (total ${world.rebaseCount})`] : []),
     ...(probe ? [`probe ${probe()}`] : []),
