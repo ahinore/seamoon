@@ -236,6 +236,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         float farFade = clamp(abs(camAlt - ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)}) / 6000.0, 0.0, 1.0);
         float bandFade = mix(0.35, 0.95, farFade * inBand + farFade * (1.0 - inBand));
         alpha *= mix(bandFade, 1.0, step(8000.0, camAlt));
+        // Distance fade: taper the deck out CONTINUOUSLY across the same
+        // 30-90 km band the discard gate uses. wVol used to gate only the
+        // discard, so the march ran at full strength right up to the cut and
+        // the deck popped off in one frame at ~89 km ("the ground vanished").
+        col *= wVol;
+        alpha *= wVol;
         // night fade
         float sunH = dot(up0, uSunDir);
         col *= smoothstep(-0.12, 0.08, sunH);
