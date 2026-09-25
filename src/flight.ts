@@ -141,7 +141,41 @@ export class FlightModel {
     const lat = num(q, 'lat', 5.5);
     const lon = num(q, 'lon', -104);
     this.findSpawn(lat, lon);
-    this.reset();
+    // Compute the spawn state but do NOT write it to the camera: the free
+    // camera / AutoPilot owns the pose until flight mode is actually entered
+    // (main.ts calls reset() explicitly at that point).
+    this.resetSilent();
+  }
+
+  /** reset() without touching the camera pose. */
+  private resetSilent(): void {
+    this.spawnStateInit();
+  }
+
+  /** Position/attitude state at the spawn point (no camera write). */
+  private spawnStateInit(): void {
+    this.pos.copy(this.spawnDir).multiplyScalar(R + this.spawnH + GEAR_H);
+    this.vel.set(0, 0, 0);
+    this.thr = 0;
+    this.frozen = false;
+    this.note = '';
+    this.apT = 0;
+    this.cruiseT = 0;
+    this.apPhase = this.mode === 'fly' ? 'takeoff' : 'off';
+    const up = this._up.copy(this.spawnDir);
+    const lon = Math.atan2(this.spawnDir.z, this.spawnDir.x);
+    const lat = Math.asin(clamp(this.spawnDir.y, -1, 1));
+    const east = this._east.set(-Math.sin(lon), 0, Math.cos(lat) * Math.cos(lon)).normalize();
+    this._north.crossVectors(up, east).normalize().negate(); // up×east = -north
+    const fwd = this._tmp
+      .copy(this._north)
+      .multiplyScalar(Math.cos(this.spawnHdg * DEG))
+      .addScaledVector(east, Math.sin(this.spawnHdg * DEG))
+      .normalize();
+    const rightH = this._tmp2.crossVectors(fwd, up).normalize();
+    const upH = _sUp.crossVectors(rightH, fwd).normalize();
+    this._basis.makeBasis(rightH, upH, _sBack.copy(fwd).negate());
+    this.q.setFromRotationMatrix(this._basis);
   }
 
   /** Body-frame airflow angles for HUD debugging (AoA deg, sideslip deg). */
@@ -213,32 +247,7 @@ export class FlightModel {
 
   /** Respawn: gear on the ground, zero velocity, aligned with the horizon. */
   reset(): void {
-    this.pos.copy(this.spawnDir).multiplyScalar(R + this.spawnH + GEAR_H);
-    this.vel.set(0, 0, 0);
-    this.thr = 0;
-    this.frozen = false;
-    this.note = '';
-    this.apT = 0;
-    this.cruiseT = 0;
-    this.apPhase = this.mode === 'fly' ? 'takeoff' : 'off';
-    const up = this._up.copy(this.spawnDir);
-    const east = this._east.set(-Math.sin(0), 0, 1); // placeholder, replaced below
-    // local east/north at the spawn point
-    const lon = Math.atan2(this.spawnDir.z, this.spawnDir.x);
-    const lat = Math.asin(clamp(this.spawnDir.y, -1, 1));
-    east
-      .set(-Math.sin(lon), 0, Math.cos(lat) * Math.cos(lon))
-      .normalize();
-    this._north.crossVectors(up, east).normalize().negate(); // up×east = -north
-    const fwd = this._tmp
-      .copy(this._north)
-      .multiplyScalar(Math.cos(this.spawnHdg * DEG))
-      .addScaledVector(east, Math.sin(this.spawnHdg * DEG))
-      .normalize();
-    const rightH = this._tmp2.crossVectors(fwd, up).normalize();
-    const upH = _sUp.crossVectors(rightH, fwd).normalize();
-    this._basis.makeBasis(rightH, upH, _sBack.copy(fwd).negate());
-    this.q.setFromRotationMatrix(this._basis);
+    this.spawnStateInit();
     this.writeCamera();
   }
 

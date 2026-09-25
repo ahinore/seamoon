@@ -19,11 +19,16 @@ export class TileMesh {
     radius: number,
     res: number,
     material: THREE.Material,
+    // Prebuilt geometry/center (sea shell path). When omitted, terrain
+    // geometry is built here as before.
+    prebuiltGeometry?: THREE.BufferGeometry,
+    prebuiltCenter?: THREE.Vector3,
   ) {
-    const built = buildTileGeometry(face, level, ix, iy, radius, res);
-    this.center = built.center;
-    this.triangles = built.geometry.index ? built.geometry.index.count / 3 : 0;
-    this.mesh = new THREE.Mesh(built.geometry, material);
+    const geometry = prebuiltGeometry ?? buildTileGeometry(face, level, ix, iy, radius, res).geometry;
+    this.center = prebuiltCenter ?? geometry.boundingSphere!.center.clone();
+    this.triangles = geometry.index ? geometry.index.count / 3 : 0;
+    this.mesh = new THREE.Mesh(geometry, material);
+    if (prebuiltGeometry) this.mesh.renderOrder = 1; // sea draws after terrain
     this.mesh.position.copy(this.center);
     this.mesh.matrixAutoUpdate = false;
     this.mesh.updateMatrix();

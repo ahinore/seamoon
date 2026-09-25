@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CameraRig } from './cameraRig';
 import { PlanetView } from './cubeSphereLod';
-import { makePlanetMaterial, makeStars } from './materials';
+import { makePlanetMaterial, makeSeaMaterial, makeStars } from './materials';
 import { makeAtmosphereMesh, makeAtmosphereUniforms } from './atmosphere';
 import { Hud } from './hud';
 import { AutoPilot } from './testAuto';
@@ -71,6 +71,10 @@ if ((renderer as unknown as { capabilities: { reverseDepthBuffer: boolean } }).c
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
+// Sun direction (unit). Slight tilt so day/night and phases are visible.
+// Shared by terrain/sea/atmosphere materials (same uniform object).
+const sunDir = new THREE.Vector3(1, 0.3, 0.35).normalize();
+
 // ?fov=<deg> (25..120) for wide-FoV testing. The screenshot of the
 // screen-edge hole was likely taken with a wide/zoomed-out view — FoV
 // widens the frustum but pxPerUnit shrinks proportionally, so SSE splits
@@ -89,15 +93,56 @@ const planet = new PlanetView(scene, R, material, {
   res: 65,
   cacheSize: 300,
 });
+
+// Phase 5 atmosphere uniforms FIRST (single source of truth): terrain and
+// sea materials reference these same objects.
+const atmoUniforms = makeAtmosphereUniforms(R);
+atmoUniforms.uSunDir.value.copy(sunDir);
+
+// Phase 7: ocean shell — a second quadtree LOD at sea level with per-vertex
+// water depth. Coarser than terrain (smooth sphere; waves are shader-side),
+// so it gets a smaller cache and slightly laxer error threshold. renderOrder
+// after terrain; depth test keeps it hidden under land automatically.
+const seaMaterial = makeSeaMaterial({
+  uSunDir: atmoUniforms.uSunDir,
+  uCamPos: atmoUniforms.uCamPos,
+  uOrigin: atmoUniforms.uOrigin,
+  uPlanetR: atmoUniforms.uPlanetR,
+  uAtmoR: atmoUniforms.uAtmoR,
+  uBetaR: atmoUniforms.uBetaR,
+  uBetaM: atmoUniforms.uBetaM,
+  uHR: atmoUniforms.uHR,
+  uHM: atmoUniforms.uHM,
+});
+const sea = new PlanetView(scene, R, seaMaterial, {
+  maxLevel: 19,
+  tauPx: 2,
+  res: 33,
+  cacheSize: 120,
+  seaMode: true,
+});
+if (urlParams.get('sea') === '0') {
+  sea.root.visible = false;
+}
 const stars = makeStars(2500, 6e8);
 scene.add(stars);
 
 // Phase 5: atmosphere shell. The mesh sits at the frame-relative planet
 // center (-origin each frame) and its shader takes the frame-relative
 // camera position and the floating origin as uniforms.
-const atmoUniforms = makeAtmosphereUniforms(R);
 const atmosphere = makeAtmosphereMesh(R, atmoUniforms);
 scene.add(atmosphere);
+// Terrain and sea uniforms are SHARED with the atmosphere: one source of
+// truth per frame (uSunDir/uCamPos/uOrigin/betas/scale heights).
+material.uniforms.uSunDir = atmoUniforms.uSunDir;
+material.uniforms.uCamPos = atmoUniforms.uCamPos;
+material.uniforms.uOrigin = atmoUniforms.uOrigin;
+material.uniforms.uPlanetR = atmoUniforms.uPlanetR;
+material.uniforms.uAtmoR = atmoUniforms.uAtmoR;
+material.uniforms.uBetaR = atmoUniforms.uBetaR;
+material.uniforms.uBetaM = atmoUniforms.uBetaM;
+material.uniforms.uHR = atmoUniforms.uHR;
+material.uniforms.uHM = atmoUniforms.uHM;
 // ?atmo=0 disables the shell (A/B for diagnosis)
 if (urlParams.get('atmo') === '0') atmosphere.visible = false;
 
@@ -150,6 +195,7 @@ const fmtDist = (m: number): string =>
   m >= 1e6 ? (m / 1e6).toFixed(2) + ' Mm' : m >= 1e4 ? (m / 1e3).toFixed(1) + ' km' : m.toFixed(1) + ' m';
 
 const auto = new AutoPilot(rig, world);
+world.abs(rig.camera.position, absCam); // autopilot placed the camera
 
 // Phase 6: flight model. F toggles between the free camera and the aircraft
 // (?demo=fly starts in the aircraft with the scripted takeoff->landing
@@ -157,6 +203,7 @@ const auto = new AutoPilot(rig, world);
 const flight = new FlightModel(rig, world);
 if (flight.mode === 'fly') {
   rig.stickMode = true;
+  flight.reset(); // aircraft owns the camera from frame 1 in fly mode
   auto.suspend();
 }
 
@@ -178,6 +225,8 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyF' && !e.repeat) toggleFlight();
   if (e.code === 'KeyR' && rig.stickMode && !e.repeat) flight.reset();
 });
+// In flight mode the rig's own R handler must not fire (R = respawn there).
+// The rig listens on window too; guard it via stickMode inside the rig.
 
 // Demo-only pixel probe: samples rendered colors so automated verification can
 // confirm actual pixels (e.g. planet lit vs. sky), not just stats. null = off.
@@ -341,9 +390,11 @@ renderer.setAnimationLoop(() => {
     if (shift) {
       rebased++;
       planet.forceReposition(world.origin);
+      sea.forceReposition(world.origin);
     }
 
     planet.update(rig.camera, world.origin, window.innerHeight);
+    sea.update(rig.camera, world.origin, window.innerHeight);
   }
   // Keep distant scenery centered on the camera (stars are only directions —
   // recenter them each frame so they never sit behind the far plane).
@@ -355,10 +406,11 @@ renderer.setAnimationLoop(() => {
   atmosphere.position.copy(world.origin).negate();
   atmoUniforms.uCamPos.value.copy(rig.camera.position);
   atmoUniforms.uOrigin.value.copy(world.origin);
-  atmoUniforms.uSunDir.value.copy(material.uniforms.uSunDir.value as THREE.Vector3);
-  (material.uniforms.uCamPos.value as THREE.Vector3).copy(rig.camera.position);
-  (material.uniforms.uOrigin.value as THREE.Vector3).copy(world.origin);
-  (material.uniforms.uSunDir.value as THREE.Vector3).copy(atmoUniforms.uSunDir.value);
+  // sea material shares the terrain's uniform objects (updated above); only
+  // its own time / viewport uniforms need ticking here.
+  seaMaterial.uniforms.uTime.value = performance.now() / 1000;
+  seaMaterial.uniforms.uFovTan.value = Math.tan(THREE.MathUtils.degToRad(rig.camera.fov) * 0.5);
+  seaMaterial.uniforms.uViewportH.value = window.innerHeight;
 
   renderer.render(scene, rig.camera);
   hud.frame(dt);
@@ -378,6 +430,7 @@ renderer.setAnimationLoop(() => {
     `revz ${(renderer as unknown as { capabilities: { reverseDepthBuffer: boolean } }).capabilities.reverseDepthBuffer ? 'ON' : 'off'}  aa ${urlParams.get('aa') === '0' ? 'off' : 'on'}`,
     `dbg cam=(${rig.camera.position.x.toFixed(0)},${rig.camera.position.y.toFixed(0)},${rig.camera.position.z.toFixed(0)}) org=(${world.origin.x.toFixed(0)},${world.origin.y.toFixed(0)},${world.origin.z.toFixed(0)})`,
     `tiles ${s.visibleTiles}  tris ${(s.triangles / 1000).toFixed(1)}k  maxLvl ${s.maxVisibleLevel}`,
+    `sea tiles ${sea.stats.visibleTiles}  tris ${(sea.stats.triangles / 1000).toFixed(1)}k  maxLvl ${sea.stats.maxVisibleLevel}`,
     `queue ${s.pending}  cache ${s.cached}  built ${s.built}  evicted ${s.evicted}  hits ${s.cacheHits}`,
     `drawcalls ${renderer.info.render.calls}`,
     rig.mouseLocked ? 'mouse locked' : 'click = mouse look (arrows also work)',

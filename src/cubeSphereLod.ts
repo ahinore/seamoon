@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { TileMesh } from './tileMesh';
 import { cubeToSphereDir } from './tileGeometry';
+import { buildSeaGeometry } from './seaGeometry';
 
 export interface PlanetOptions {
   /** Max quadtree depth. 17+ reaches ~1 m vertex spacing on Earth radius. */
@@ -26,7 +27,14 @@ export interface PlanetOptions {
    * but terrain (Phase 3) will need real detail. Children halve their
    * footprint per level, so the merge threshold (0.1*tau) stays chatter-free.
    */
+  /** Screen-footprint cap in pixels (see capPx docs). */
   capPx?: number;
+  /**
+   * Phase 7: sea mode — tiles are the OCEAN SHELL (smooth sphere at sea
+   * level + per-vertex water-depth attribute). Use with a sea material and
+   * seaLevel radius; coarser settings are fine (no terrain displacement).
+   */
+  seaMode?: boolean;
 }
 
 export interface LodStats {
@@ -81,7 +89,7 @@ export class PlanetView {
     pending: 0, cached: 0, built: 0, evicted: 0, cacheHits: 0,
   };
 
-  private readonly o: Required<PlanetOptions>;
+  private readonly o: Required<Omit<PlanetOptions, 'seaMode'>> & { seaMode: boolean };
   private readonly radius: number;
   private readonly material: THREE.Material;
   private readonly roots: QNode[] = [];
@@ -97,7 +105,11 @@ export class PlanetView {
   constructor(scene: THREE.Scene, radius: number, material: THREE.Material, opts: PlanetOptions = {}) {
     this.radius = radius;
     this.material = material;
-    this.o = { maxLevel: 20, tauPx: 2, res: 65, cacheSize: 300, buildBudget: 12, buildBudgetMs: 6, capPx: 350, ...opts };
+    this.o = {
+      maxLevel: 20, tauPx: 2, res: 65, cacheSize: 300, buildBudget: 12, buildBudgetMs: 6, capPx: 350,
+      seaMode: false,
+      ...opts,
+    } as Required<Omit<PlanetOptions, 'seaMode'>> & { seaMode: boolean };
 
     // Roots are built synchronously so the planet exists from frame 1.
     for (let f = 0; f < 6; f++) {
@@ -326,6 +338,17 @@ export class PlanetView {
   }
 
   private acquireTile(node: QNode): TileMesh {
+    if (this.o.seaMode) {
+      // Ocean shell: smooth sphere + depth attribute, built via seaGeometry
+      const built = buildSeaGeometry(node.face, node.level, node.ix, node.iy, this.radius, this.o.res);
+      const t = new TileMesh(
+        node.face, node.level, node.ix, node.iy, this.radius, this.o.res, this.material,
+        built.geometry, built.center,
+      );
+      this.root.add(t.mesh);
+      this.stats.built++;
+      return t;
+    }
     const t = new TileMesh(node.face, node.level, node.ix, node.iy, this.radius, this.o.res, this.material);
     this.root.add(t.mesh);
     this.stats.built++;

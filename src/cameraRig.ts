@@ -96,7 +96,9 @@ export class CameraRig {
         if (d >= 1 && d <= 5) this.speedMultiplier = d;
       }
       if (ev.code === 'ShiftLeft' || ev.code === 'ShiftRight') this.boost = true;
-      if (ev.code === 'KeyR') this.autoLevel = !this.autoLevel;
+      // R toggles auto-level in free-cam mode; in flight mode R respawns the
+      // aircraft (handled by main.ts), so the toggle must not fire.
+      if (ev.code === 'KeyR' && !this.stickMode) this.autoLevel = !this.autoLevel;
       if (ev.code.startsWith('Arrow')) ev.preventDefault();
     });
     window.addEventListener('keyup', (ev) => {
