@@ -96,6 +96,9 @@ export function buildTileGeometry(
   const oneLevel = (edge * edge) / (2 * (res - 1) * (res - 1) * radius);
   const skirtDepth = oneLevel * 20 + MAX_ELEV;
 
+  // meters between adjacent lattice points — also drives LOD octave fading
+  const spacing = edge / (n - 1);
+
   // ---- shared height lattice: grid extended by 1 cell on every side ----
   // Lattice (I,J) with I,J in 0..n+1 maps to grid (ii, jj) = I-1, J-1 in
   // [-1..n]; vertices use ii/jj clamped to [0..n-1] (=> lattice 1..n), and
@@ -111,14 +114,16 @@ export function buildTileGeometry(
       const v = v0 + (scale * jj) / (n - 1);
       cubeToSphereDir(face, u, v, dir);
       const k = J * nLat + I;
-      hLat[k] = terrainHeight(dir.x, dir.y, dir.z);
+      // spacing of THIS tile's vertex grid — the height field fades its
+      // finest octaves accordingly (anti-aliasing, kills LOD seam lakes)
+      hLat[k] = terrainHeight(dir.x, dir.y, dir.z, spacing);
       dirLat[k * 3] = dir.x;
       dirLat[k * 3 + 1] = dir.y;
       dirLat[k * 3 + 2] = dir.z;
     }
   }
-  // meters between adjacent lattice points (for the slope estimate)
-  const spacing = edge / (n - 1);
+  // meters between adjacent lattice points
+  void spacing;
 
   const positions = new Float32Array(nu * nu * 3);
   const normals = new Float32Array(nu * nu * 3);

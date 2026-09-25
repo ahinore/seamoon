@@ -46,7 +46,10 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
   const geo = new THREE.SphereGeometry(planetR + (CLOUD_BOTTOM + CLOUD_TOP) / 2, 128, 96);
   const mat = new THREE.ShaderMaterial({
     uniforms: uniforms as unknown as { [k: string]: THREE.IUniform },
-    side: THREE.BackSide,
+    // DoubleSide: BackSide alone is only visible from INSIDE the sphere
+    // (ground looking up). From space the front faces face away, so the
+    // cloud pattern must render on the FRONT hull too.
+    side: THREE.DoubleSide,
     transparent: true,
     depthWrite: false,
     vertexShader: /* glsl */ `
@@ -111,12 +114,18 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         float lat = asin(clamp(up.y, -1.0, 1.0));
         float bands = 0.55 + 0.45 * cos(lat * 6.0) * 0.5 + 0.25 * exp(-pow((abs(lat) - 0.15) * 3.0, 2.0));
         float cover = clamp(uCover * bands * 1.6 * weather + (weather - 0.5) * 0.4, 0.0, 1.0);
+        cover = pow(cover, 0.7); // bias toward more visible coverage
 
         // ---- cloud density field: detail noise carved by coverage ----
         vec3 dq = up * 40.0; // detail scale ~ R/40 (~160 km cells)
         float t2 = uTime * 0.006;
         float detail = fbm4(dq + vec3(t2, t2 * 1.3, -t2) + weather * 1.5);
-        float density = smoothstep(1.0 - cover, 1.0 - cover * 0.55, detail * 0.75 + cover * 0.35);
+        // detail ~[0,0.94] centered ~0.47; remap around 0.5 and threshold by
+        // coverage: low cover = rare peaks only, high cover = broad deck
+        float dn = detail - 0.47;
+        float thr = mix(0.28, -0.12, cover); // higher cover -> lower threshold
+        float density = smoothstep(thr, thr + 0.22, dn);
+        density = clamp(density * 1.4, 0.0, 1.0);
 
         // vertical profile: puffy middle, wispy top/bottom
         density *= 0.65 + 0.35 * sin(hLayer * 3.14159);
@@ -131,8 +140,16 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         float rim = pow(clamp(dot(V, uSunDir) * 0.5 + 0.5, 0.0, 1.0), 3.0);
         col += vec3(1.0, 0.9, 0.75) * rim * (1.0 - density) * 0.6;
 
-        // altitude-based opacity: fade out when the camera is inside the
-        // layer band (flying through), full when far above/below.
+        // camera is ABOVE the cloud layer top: use the front hull (overcast
+        // deck below); INSIDE the band or below: use the back hull overhead.
+        // Testing altitude directly avoids relying on face orientation.
+        float aboveTop = step(4500.0, camAlt);
+        float qSide = mix(1.0, 0.0, aboveTop); // 1 = back hull, 0 = front
+        // front hull seen from above reads brighter (direct sun on tops)
+        if (qSide < 0.5) {
+          // soften the pattern seen from space (distance mutes contrast)
+          density = density * 0.96 + 0.04 * cover;
+        }
         float inBand = smoothstep(0.0, 0.25, hLayer) * (1.0 - smoothstep(0.75, 1.0, hLayer));
         float farFade = clamp(abs(camAlt - ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)}) / 6000.0, 0.0, 1.0);
         float alpha = density * mix(0.35, 0.95, farFade * inBand + farFade * (1.0 - inBand));

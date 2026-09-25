@@ -24,7 +24,24 @@ export const SEED = 1337;
 /** Max plausible elevation, used for color mapping and bounds. */
 export const MAX_ELEV = 9200;
 
-export function terrainHeight(x: number, y: number, z: number): number {
+const R_E = 6_371_000; // planet radius (m) — for wavelength math only
+
+/**
+ * Octave visibility for a mesh whose vertices are `spacing` meters apart.
+ * A noise octave with ground wavelength R/freq sampled every `spacing`
+ * meters ALIASES when the wavelength approaches 2 samples (Nyquist): the
+ * coarse mesh then oscillates around the true terrain and dips below sea
+ * level over land — "false lakes" that change pattern at every tile
+ * boundary (LOD seams). Fading such octaves out keeps coarse meshes smooth
+ * and consistent. spacing 0 = full detail (physics / close-up LOD).
+ */
+function octaveFade(freq: number, spacing: number): number {
+  if (spacing <= 0) return 1;
+  const wl = R_E / freq; // ground wavelength in meters
+  return smoothstep(2 * spacing, 4 * spacing, wl);
+}
+
+export function terrainHeight(x: number, y: number, z: number, spacing = 0): number {
   // continent mask: very low frequency, sharp-ish land/ocean split
   const c = fbm3(x * 1.2, y * 1.2, z * 1.2, SEED, 4);
   const land = smoothstep(-0.08, 0.12, c);
@@ -64,6 +81,13 @@ export function terrainHeight(x: number, y: number, z: number): number {
   const f = fbm3(px * 2560, py * 2560, pz * 2560, SEED + 313, 4);
   const erosion = 1 - 0.75 * mountainMask * m;
 
+  // LOD octave fading (anti-alias): octaves whose wavelength approaches the
+  // mesh's Nyquist limit fade out so coarse tiles stay smooth and continuous
+  // across boundaries. spacing 0 keeps every octave (physics ground truth).
+  const dF = octaveFade(160, spacing);   // hills (hills have 4 inner octaves)
+  const gF = octaveFade(1050, spacing);  // foothills
+  const fF = octaveFade(2560, spacing);  // fine detail
+
   // ocean floor: gentle negative relief, with hadal trenches in the deep
   // basins (ridged noise carves long narrow trenches ~10 km deep)
   const trench = ridged3(px * 14, py * 14, pz * 14, SEED + 611, 4);
@@ -72,9 +96,9 @@ export function terrainHeight(x: number, y: number, z: number): number {
   const landElev =
     60 * land +                        // coastal plains baseline
     8200 * mountainMask * m +          // mountain ranges (Everest-class)
-    700 * d * land +                   // hills
-    420 * g * land +                   // foothills / medium relief
-    160 * f * land * erosion;          // fine roughness, damped on ridges
+    700 * d * land * dF +              // hills
+    420 * g * land * gF +              // foothills / medium relief
+    160 * f * land * erosion * fF;     // fine roughness, damped on ridges
 
   return land * landElev + (1 - land) * ocean;
 }
