@@ -1,25 +1,21 @@
 import * as THREE from 'three';
 
 /**
- * Cloud layer (Phase 8 + volumetric upgrade).
+ * Cloud layer (Phase 8, volumetric-only).
  *
- * TWO representations, cross-faded by camera altitude:
+ * FAR-VIEW 2D SHELL IS DISABLED (user request): the old flat shell read
+ * as fake continents from orbit and made the system confusing. Above
+ * ~90 km camera altitude the mesh discards every fragment — space views
+ * show NO clouds (terrain/ocean only).
  *
- *  - FAR (camAlt > ~60 km): flat 2D shell — the original fragment-shader
- *    weather pattern on a sphere hull. Cheap and stable from orbit.
- *
- *  - NEAR (camAlt < ~60 km): raymarched VOLUMETRIC clouds inside the slab
- *    [CLOUD_BOTTOM, CLOUD_TOP]. The density field is "metaball-like":
- *    billowed (1-|2x-1|) fbm gives rounded, overlapping puffs; the
- *    low-frequency weather field gates where puffs are allowed;
- *    high-frequency noise erodes puff edges. Each sample is lit by a
- *    short march toward the sun (Beer-Lambert shadowing + phase +
- *    powder term) and the eye ray accumulates front-to-back with early
- *    exit — real thickness, self-shadowing, silver linings, silhouettes
- *    that change with the viewing angle.
- *
- * The crossfade keeps the Phase-8 completion criterion: climbing through
- * the layer into space never pops between representations.
+ * NEAR (camAlt < ~60 km): raymarched VOLUMETRIC clouds inside the slab
+ * [CLOUD_BOTTOM, CLOUD_TOP]. The density field is "metaball-like":
+ * billowed (1-|2x-1|) fbm gives rounded, overlapping puffs; the
+ * low-frequency weather field gates where puffs are allowed;
+ * high-frequency noise erodes puff edges. Each sample is lit by a
+ * short march toward the sun (Beer-Lambert shadowing + phase + powder
+ * term) and the eye ray accumulates front-to-back with early exit —
+ * real thickness, self-shadowing, silver linings.
  */
 export const CLOUD_BOTTOM = 1800; // m above sea level
 export const CLOUD_TOP = 4200; // m above sea level (slab thickness)
@@ -148,7 +144,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         float hLayer = clamp((length(vWorld - pc) - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
                              ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)}, 0.0, 1.0);
 
-        // ---------------- weather / coverage (shared by both paths) ----
+        // FAR-VIEW SHELL DISABLED (user request): clouds are volumetric-only.
+        // Above the fade band this mesh discards — no clouds from orbit.
+        float wVol = (1.0 - smoothstep(30000.0, 90000.0, camAlt)) * step(0.001, uVolSteps);
+        if (wVol <= 0.001) discard;
+
+        // ---------------- weather / coverage ----------------
         vec3 upF = normalize(vWorld - pc);
         vec3 q = upF * 2.2; // weather scale ~ R/2.2
         float wTime = uTime * 0.002;
@@ -157,29 +158,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         float bands = 0.55 + 0.45 * cos(lat * 6.0) * 0.5 + 0.25 * exp(-pow((abs(lat) - 0.15) * 3.0, 2.0));
         float cover = clamp(uCover * bands * 1.6 * weather + (weather - 0.5) * 0.4, 0.0, 1.0);
         cover = pow(cover, 0.7); // bias toward more visible coverage
-
-        // ================= 2D shell path (far view) ====================
         float t2 = uTime * 0.006;
-        // The shell shows the SAME density field the volumetric path
-        // marches, sampled at the fragment's own position on the shell
-        // (mid-layer). Wide smoothstep edge = distance anti-aliasing.
-        float distFrag = length(uCamPos - vWorld);
-        float edge = mix(0.30, 0.65, clamp(distFrag / 2.0e6, 0.0, 1.0));
-        float shellDensity = cloudDensity(vWorld - pc, cover, weather, t2, edge);
-        // vertical profile: puffy middle, wispy top/bottom
-        shellDensity *= 0.65 + 0.35 * sin(hLayer * 3.14159);
-
-        float ndl = clamp(dot(upF, uSunDir) * 0.6 + 0.4, 0.0, 1.0);
-        vec3 shellCol = vec3(1.0) * (0.35 + 0.65 * ndl);
-        vec3 V = normalize(uCamPos - vWorld);
-        float rim = pow(clamp(dot(V, uSunDir) * 0.5 + 0.5, 0.0, 1.0), 3.0);
-        shellCol += vec3(1.0, 0.9, 0.75) * rim * (1.0 - shellDensity) * 0.6;
-        float shellAlpha = shellDensity;
-        if (camAlt > 8000.0) shellAlpha = shellDensity * 0.95;
-
-        // blend factor: volumetric near, shell far
-        // float wVol = 0.0; // TEST-A: shell path only
-        float wVol = (1.0 - smoothstep(30000.0, 90000.0, camAlt)) * step(0.001, uVolSteps);
 
         // ============ volumetric march (near view) ====================
         vec3 volCol = vec3(0.0);
@@ -254,14 +233,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         }
 
         // ---------------- composite ----------------
-        vec3 col = mix(shellCol, volCol, wVol);
-        float alpha = mix(shellAlpha, 1.0 - volT, wVol);
-        // altitude-based opacity fade inside the band (flying through) —
-        // shell path only; the volumetric march handles its own thinning.
+        vec3 col = volCol;
+        float alpha = 1.0 - volT;
+        // altitude-based opacity fade inside the band (flying through)
         float inBand = smoothstep(0.0, 0.25, hLayer) * (1.0 - smoothstep(0.75, 1.0, hLayer));
         float farFade = clamp(abs(camAlt - ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)}) / 6000.0, 0.0, 1.0);
         float bandFade = mix(0.35, 0.95, farFade * inBand + farFade * (1.0 - inBand));
-        alpha *= mix(1.0, bandFade, (1.0 - wVol) * step(camAlt, 8000.0));
+        alpha *= mix(bandFade, 1.0, step(8000.0, camAlt));
         // night fade
         float sunH = dot(up0, uSunDir);
         col *= smoothstep(-0.12, 0.08, sunH);
