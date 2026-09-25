@@ -3,6 +3,7 @@ import { CameraRig } from './cameraRig';
 import { PlanetView } from './cubeSphereLod';
 import { makePlanetMaterial, makeSeaMaterial, makeStars } from './materials';
 import { makeAtmosphereMesh, makeAtmosphereUniforms } from './atmosphere';
+import { makeCloudMesh, makeCloudUniforms } from './clouds';
 import { Hud } from './hud';
 import { AutoPilot } from './testAuto';
 import { FlightModel } from './flight';
@@ -145,6 +146,13 @@ material.uniforms.uHR = atmoUniforms.uHR;
 material.uniforms.uHM = atmoUniforms.uHM;
 // ?atmo=0 disables the shell (A/B for diagnosis)
 if (urlParams.get('atmo') === '0') atmosphere.visible = false;
+
+// Phase 8: cloud shell (same inverted-hull pattern; ?clouds=0 disables).
+const cloudUniforms = makeCloudUniforms(R);
+cloudUniforms.uSunDir = atmoUniforms.uSunDir; // share the sun object
+const clouds = makeCloudMesh(R, cloudUniforms);
+scene.add(clouds);
+if (urlParams.get('clouds') === '0') clouds.visible = false;
 
 const hud = new Hud('hud');
 const absCam = new THREE.Vector3(0, 0, R * 4); // absolute camera position
@@ -406,6 +414,10 @@ renderer.setAnimationLoop(() => {
   atmosphere.position.copy(world.origin).negate();
   atmoUniforms.uCamPos.value.copy(rig.camera.position);
   atmoUniforms.uOrigin.value.copy(world.origin);
+  clouds.position.copy(world.origin).negate();
+  cloudUniforms.uCamPos.value.copy(rig.camera.position);
+  cloudUniforms.uOrigin.value.copy(world.origin);
+  cloudUniforms.uTime.value = performance.now() / 1000;
   // sea material shares the terrain's uniform objects (updated above); only
   // its own time / viewport uniforms need ticking here.
   seaMaterial.uniforms.uTime.value = performance.now() / 1000;
