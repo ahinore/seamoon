@@ -42,9 +42,13 @@ function octaveFade(freq: number, spacing: number): number {
 }
 
 export function terrainHeight(x: number, y: number, z: number, spacing = 0): number {
-  // continent mask: very low frequency, sharp-ish land/ocean split
+  // continent mask: very low frequency, sharp-ish land/ocean split.
+  // The blend band must stay NARROW (~160 km on the ground): a wide
+  // smoothstep used to flood whole continental interiors — the composite
+  // sank every land<1 region toward the ocean floor and the sea shell
+  // rendered it as pale shallow "sunken lowlands".
   const c = fbm3(x * 1.2, y * 1.2, z * 1.2, SEED, 4);
-  const land = smoothstep(-0.08, 0.12, c);
+  const land = smoothstep(-0.02, 0.06, c);
 
   // Domain warping: bend the input of the ridge/hill layers by a mid-frequency
   // noise field. Breaks up the radial symmetry of plain fBm and gives ranges
@@ -94,11 +98,11 @@ export function terrainHeight(x: number, y: number, z: number, spacing = 0): num
   const ocean = -900 - 2600 * smoothstep(0.0, -0.6, c) - 6500 * smoothstep(0.55, 0.95, trench);
 
   const landElev =
-    60 * land +                        // coastal plains baseline
-    8200 * mountainMask * m +          // mountain ranges (Everest-class)
-    700 * d * land * dF +              // hills
-    420 * g * land * gF +              // foothills / medium relief
-    160 * f * land * erosion * fF;     // fine roughness, damped on ridges
+    180 * land +                        // coastal plains baseline (keeps lowlands above sea level)
+    8200 * mountainMask * m +           // mountain ranges (Everest-class)
+    700 * (d * 0.5 + 0.5) * land * dF + // hills: UNIPOLAR 0..700 so inland terrain never dips below sea level
+    420 * (g * 0.5 + 0.5) * land * gF + // foothills: unipolar 0..420
+    160 * f * land * erosion * fF;      // fine roughness (small amplitude, sign is fine), damped on ridges
 
   return land * landElev + (1 - land) * ocean;
 }
