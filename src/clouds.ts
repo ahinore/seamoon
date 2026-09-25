@@ -132,10 +132,10 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         // sat BELOW the mean: with cover ~0.4+ the smoothstep fired over
         // most of the field, every grazing ray saturated alpha within its
         // 40 km budget, and the deck read as a flat gray "water" sheet.
-        // thr is now anchored ABOVE the median so coverage follows the cover
-        // uniform instead of saturating: low cover picks the top ~15% of
-        // puffs, high cover (~0.9) still only claims the top ~45%.
-        float thr = mix(0.62, 0.28, cover);
+        // thr is anchored WELL above the median so the deck stays SPARSE:
+        // low cover picks the top ~10% of puffs, high cover (~0.9) still
+        // only claims the top ~40%.
+        float thr = mix(0.70, 0.36, cover);
         float d = smoothstep(thr, thr + edge, billow * (0.55 + 0.45 * cover));
         d = clamp(d * 1.35, 0.0, 1.0);
         // Cluster gate: the old smoothstep(0.42,0.62) was so tight that only
@@ -208,7 +208,11 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
             // wall. 40 km keeps distant air hazy instead of solid.
             t1 = min(t1, t0 + 40000.0);
             float dt = (t1 - t0) / float(steps);
-            float t = t0 + dt * 0.5;
+            // Dither the march start (blue-noise-ish hash of the pixel +
+            // frame): uniform steps quantize smooth density fields into
+            // visible concentric banding — the "ripple rings" artifact.
+            float jit = hash13(vec3(gl_FragCoord.xy, fract(uTime) * 113.0));
+            float t = t0 + dt * jit;
             float phase = 0.35 + 0.65 * pow(clamp(dot(rd, uSunDir) * 0.5 + 0.5, 0.0, 1.0), 2.0);
             for (int i = 0; i < MAX_STEPS; i++) {
               if (i >= steps) break;
@@ -216,10 +220,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
               float r = length(p);
               float h = clamp((r - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
                               ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)}, 0.0, 1.0);
+              // Distance-LOD: the field granularity is chosen ONCE per ray
+              // from the ray's slab-entry distance — per-step values would
+              // quantize the march into concentric rings (visible ripple
+              // bands on grazing views).
+              float cs = 1.0 + min(t0, 40000.0) * (1.0 / 15000.0);
               // ---- unified density: same function the far shell shows ----
-              // Distance-LOD: samples far along the ray use a coarser field
-              // (cs = 1 + t/15km), killing subpixel puff aliasing.
-              float cs = 1.0 + t * (1.0 / 15000.0);
               float d = cloudDensity(p, cover, weather, t2, 0.18, cs);
               // edge erosion: high-frequency wisps carve the surface (fades
               // out with distance LOD so far samples stay smooth)
@@ -244,7 +250,8 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
                 // tops catch the sun: height-based ambient brightening
                 vec3 lit = vec3(1.0, 0.98, 0.95) * shadow * phase * (0.35 + 0.65 * powder)
                          + vec3(0.55, 0.63, 0.78) * (0.40 + 0.35 * h); // sky ambient
-                float aStep = 1.0 - exp(-d * dt * 0.0045);
+                float aStep = 1.0 - exp(-d * dt * 0.0022); // lower extinction:
+                // puffs stay translucent instead of piling into an opaque sheet
                 volCol += lit * aStep * volT;
                 volT *= 1.0 - aStep;
                 if (volT < 0.03) break;
