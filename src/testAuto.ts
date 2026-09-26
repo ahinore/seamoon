@@ -1,8 +1,11 @@
 import * as THREE from 'three';
 import type { CameraRig } from './cameraRig';
 import type { WorldOrigin } from './world';
+import { moonPositionAtAngle } from './moonOrbit';
 
 const PLANET_R = 6_371_000;
+const R_MOON = 1_737_000;
+const DEG = Math.PI / 180;
 
 /**
  * Test instrumentation for verifying milestones without manual input.
@@ -48,6 +51,8 @@ export class AutoPilot {
   // through any number of floating-origin rebases (stored absolute).
   private readonly homePos = new THREE.Vector3();
   private readonly homeQ = new THREE.Quaternion();
+  /** Frozen moon orbit angle (rad) from ?moonangle, or null = live orbit. */
+  readonly moonAngle: number | null;
 
   constructor(rig: CameraRig, world: WorldOrigin) {
     const q = new URLSearchParams(location.search);
@@ -61,6 +66,49 @@ export class AutoPilot {
       this.alt1 = alt;
     }
     this.world = world;
+    // ?moonangle=<deg> freezes the moon at an orbit angle (testing): the
+    // main loop skips its time-based update when this is present.
+    this.moonAngle = q.has('moonangle') ? num(q, 'moonangle', 0) * DEG : null;
+
+    // ?body=moon relocates the spawn to lunar orbit (M9.2 test hook):
+    // hover over the moon's surface at ?alt, nadir view, moon frozen at
+    // ?moonangle. The moon's absolute center comes from moonOrbit.
+    if (q.get('body') === 'moon') {
+      const ang = this.moonAngle ?? 0;
+      moonPositionAtAngle(ang, _moonC);
+      const lat2 = num(q, 'lat', 0) * Math.PI / 180;
+      const lon2 = num(q, 'lon', 0) * Math.PI / 180;
+      // radial position above the moon's near-side point (lat/lon on the
+      // moon's own frame aligned with the world axes for test simplicity)
+      _pos.set(
+        Math.cos(lat2) * Math.cos(lon2),
+        Math.sin(lat2),
+        Math.cos(lat2) * Math.sin(lon2),
+      ).multiplyScalar(R_MOON + this.alt0).add(_moonC);
+      this.world.origin.set(0, 0, 0);
+      rig.camera.position.copy(_pos);
+      rig.camera.up.set(0, 1, 0);
+      rig.camera.lookAt(_moonC);
+      const pitchDeg2 = num(q, 'pitch', -90);
+      if (pitchDeg2 !== -90) {
+        const upM = _east.copy(_pos).sub(_moonC).normalize();
+        // tilt around an axis perpendicular to the view dir and up
+        const axis = _qt.setFromAxisAngle(
+          _east.crossVectors(upM, rig.camera.position.clone().sub(_moonC)).normalize(),
+          0,
+        );
+        void axis;
+        // simple: rotate the nadir quaternion around the local east-ish axis
+        const eastM = _east.set(0, 1, 0).cross(upM).normalize();
+        if (eastM.lengthSq() < 0.5) eastM.set(1, 0, 0);
+        const qTilt = _qt.setFromAxisAngle(eastM, (pitchDeg2 + 90) * Math.PI / 180);
+        rig.camera.quaternion.premultiply(qTilt);
+      }
+      if (q.get('level') === '0') rig.autoLevel = false;
+      this.homePos.copy(_pos);
+      this.homeQ.copy(rig.camera.quaternion);
+      return;
+    }
     // Start on +Z (absolute), looking straight down at the surface below.
     // ?lat/&lon (deg) relocate the hover point onto any spot on the globe —
     // used by terrain tests to hover over known landmasses.
@@ -228,6 +276,7 @@ export class AutoPilot {
 }
 
 const ORIGIN = new THREE.Vector3(0, 0, 0);
+const _moonC = new THREE.Vector3();
 const _abs = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
 const _pos = new THREE.Vector3();

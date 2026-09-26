@@ -9,7 +9,7 @@ import { AutoPilot } from './testAuto';
 import { FlightModel } from './flight';
 import { WorldOrigin } from './world';
 import { makeMoonMaterial } from './moonMaterial';
-import { moonPosition } from './moonOrbit';
+import { moonPosition, moonPositionAtAngle } from './moonOrbit';
 import { MOON_BODY } from './moonBody';
 
 const R = 6_371_000; // Earth radius, meters
@@ -177,16 +177,36 @@ const t0Sim = performance.now() / 1000;
 const hud = new Hud('hud');
 const absCam = new THREE.Vector3(0, 0, R * 4); // absolute camera position
 let rigRef: CameraRig | null = null;
+// Nearest-body reference (Phase 9 M9.2): 'earth' or 'moon'. All single-body
+// references (altitude for near-plane/speed, zenith for auto-level) resolve
+// against the CURRENT nearest body so lunar flight behaves correctly.
+let nearBody: 'earth' | 'moon' = 'earth';
+const _bodyUp = new THREE.Vector3();
+const _moonAbsC = new THREE.Vector3();
 const rig = new CameraRig(
   renderer.domElement,
   new THREE.Vector3(0, 0, R * 4), // start frame-relative == absolute (origin 0)
   new THREE.Vector3(0, 0, 0),
-  // Altitude uses the ABSOLUTE camera position (origin-aware).
-  () => (rigRef ? Math.max(absCam.length() - R, 0) : Number.POSITIVE_INFINITY),
-  // Local zenith in frame-relative space: with a floating origin the planet
-  // center sits at -origin, so "up" (away from the center) is +origin
-  // normalized. (Getting the sign wrong here tumbles the auto-leveler.)
-  () => _up.copy(world.origin).normalize(),
+  // Altitude uses the ABSOLUTE camera position relative to the NEAREST body
+  // (origin-aware, moon-aware).
+  () => {
+    if (!rigRef) return Number.POSITIVE_INFINITY;
+    if (nearBody === 'moon') {
+      return Math.max(absCam.distanceTo(moonView.bodyCenter) - R_MOON, 0);
+    }
+    return Math.max(absCam.length() - R, 0);
+  },
+  // Local zenith: radial away from the nearest body's center. With a floating
+  // origin the planet center sits at -origin (earth) or bodyCenter-origin
+  // (moon) in frame space; "up" points away from that center.
+  () => {
+    if (nearBody === 'moon') {
+      _bodyUp.copy(rigRef ? rigRef.camera.position : _up.set(0, 0, 0));
+      _bodyUp.add(world.origin).sub(moonView.bodyCenter);
+      return _bodyUp.normalize();
+    }
+    return _up.copy(world.origin).normalize();
+  },
 );
 rig.camera.fov = fovDeg;
 rig.camera.updateProjectionMatrix();
@@ -441,11 +461,23 @@ renderer.setAnimationLoop(() => {
   cloudUniforms.uOrigin.value.copy(world.origin);
   cloudUniforms.uTime.value = performance.now() / 1000;
   // Moon orbit: the absolute position goes into the LOD placement math and
-  // the group sits at bodyCenter - origin in frame space. The moon is NOT
-  // affected by floating-origin rebases in any special way — tiles are
-  // placed per-frame from absolute centers like Earth's.
-  moonPosition(performance.now() / 1000 - t0Sim, moonView.bodyCenter);
+  // the group sits at bodyCenter - origin in frame space. ?moonangle=<deg>
+  // (test hook) freezes the orbit at a fixed angle.
+  if (auto.moonAngle !== null) {
+    moonPositionAtAngle(auto.moonAngle, moonView.bodyCenter);
+  } else {
+    moonPosition(performance.now() / 1000 - t0Sim, moonView.bodyCenter);
+  }
   moonView.root.position.copy(moonView.bodyCenter).sub(world.origin);
+  // Nearest-body selection (M9.2): whichever surface the camera is closest
+  // to (SOI handoff for the future orbit mechanics; today it steers the
+  // rig's altitude/zenith references). Hysteresis via simple nearest-wins.
+  {
+    const dEarth = absCam.length() - R;
+    _moonAbsC.copy(absCam).sub(moonView.bodyCenter);
+    const dMoon = _moonAbsC.length() - R_MOON;
+    nearBody = dMoon < dEarth ? 'moon' : 'earth';
+  }
   // sea material shares the terrain's uniform objects (updated above); only
   // its own time / viewport uniforms need ticking here.
   seaMaterial.uniforms.uTime.value = performance.now() / 1000;
@@ -456,7 +488,10 @@ renderer.setAnimationLoop(() => {
   hud.frame(dt);
 
   const s = planet.stats;
-  const alt = Math.max(absCam.length() - R, 0);
+  // HUD altitude is relative to the NEAREST body (lunar hover shows lunar alt)
+  const alt = nearBody === 'moon'
+    ? Math.max(absCam.distanceTo(moonView.bodyCenter) - R_MOON, 0)
+    : Math.max(absCam.length() - R, 0);
   const look = rig.getLookAngles();
   const moonDist = moonView.bodyCenter.length() - R_MOON;
   hud.update([
@@ -466,7 +501,7 @@ renderer.setAnimationLoop(() => {
     ...(speedup > 1 ? [`speedup x${speedup}`] : []),
     ...(rebased > 0 ? [`rebase x${rebased} (total ${world.rebaseCount})`] : []),
     ...(probe ? [`probe ${probe()}`] : []),
-    `alt ${fmtDist(alt)}  speed ${fmtDist(rig.currentSpeed)}/s  x${rig.speedMultiplier}`,
+    `alt ${fmtDist(alt)} (${nearBody})  speed ${fmtDist(rig.currentSpeed)}/s  x${rig.speedMultiplier}`,
     `moon dist ${fmtDist(moonDist)}  tiles ${moonView.stats.visibleTiles} L${moonView.stats.maxVisibleLevel}`,
     `pitch ${look.pitch.toFixed(1)}°  bank ${look.bank.toFixed(1)}°  hdg ${look.heading.toFixed(0)}°  level ${rig.autoLevel ? 'on(R)' : 'off(R)'}`,
     `revz ${(renderer as unknown as { capabilities: { reverseDepthBuffer: boolean } }).capabilities.reverseDepthBuffer ? 'ON' : 'off'}  aa ${urlParams.get('aa') === '0' ? 'off' : 'on'}`,
