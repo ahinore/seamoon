@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { TileMesh } from './tileMesh';
-import { cubeToSphereDir } from './tileGeometry';
+import { buildTileGeometry, cubeToSphereDir, EARTH_BODY, type BodySurface } from './tileGeometry';
 import { buildSeaGeometry } from './seaGeometry';
 
 export interface PlanetOptions {
@@ -88,6 +88,15 @@ export class PlanetView {
     visibleTiles: 0, triangles: 0, maxVisibleLevel: 0,
     pending: 0, cached: 0, built: 0, evicted: 0, cacheHits: 0,
   };
+  /**
+   * Phase 9: this body's center in ABSOLUTE coordinates. Earth stays at
+   * (0,0,0); the moon's group node is translated to its orbital position
+   * each frame and this field feeds the placement math. Frame-relative
+   * tile placement is always `center + bodyCenter - origin` in double.
+   */
+  bodyCenter = new THREE.Vector3();
+  /** The surface functions this planet's tiles sample. */
+  private readonly body: BodySurface;
 
   private readonly o: Required<Omit<PlanetOptions, 'seaMode'>> & { seaMode: boolean };
   private readonly radius: number;
@@ -97,14 +106,16 @@ export class PlanetView {
   private readonly queue: QNode[] = [];
   private readonly camPos = new THREE.Vector3();
   private readonly originV = new THREE.Vector3();
+  private readonly _absC = new THREE.Vector3();
   private pxPerUnit = 1;
   private readonly frustum = new THREE.Frustum();
   private readonly sphere = new THREE.Sphere();
   private readonly projScreen = new THREE.Matrix4();
 
-  constructor(scene: THREE.Scene, radius: number, material: THREE.Material, opts: PlanetOptions = {}) {
+  constructor(scene: THREE.Scene, radius: number, material: THREE.Material, opts: PlanetOptions = {}, body: BodySurface = EARTH_BODY) {
     this.radius = radius;
     this.material = material;
+    this.body = body;
     this.o = {
       maxLevel: 20, tauPx: 2, res: 65, cacheSize: 300, buildBudget: 12, buildBudgetMs: 6, capPx: 350,
       seaMode: false,
@@ -129,7 +140,11 @@ export class PlanetView {
 
   private repositionSubtree(node: QNode): void {
     if (node.tile) {
-      node.tile.mesh.position.copy(node.center).sub(this.originV);
+      node.tile.mesh.position.set(
+        node.center.x + this.bodyCenter.x - this.originV.x,
+        node.center.y + this.bodyCenter.y - this.originV.y,
+        node.center.z + this.bodyCenter.z - this.originV.z,
+      );
       node.tile.mesh.updateMatrix();
     }
     if (node.children) for (const c of node.children) this.repositionSubtree(c);
@@ -204,9 +219,11 @@ export class PlanetView {
 
   private visit(node: QNode): void {
     // Frustum test in frame-relative space (meshes live there too).
-    const cx = node.center.x - this.originV.x;
-    const cy = node.center.y - this.originV.y;
-    const cz = node.center.z - this.originV.z;
+    // The body's absolute center is added first (moon orbit), then the
+    // origin subtracted — all double math.
+    const cx = node.center.x + this.bodyCenter.x - this.originV.x;
+    const cy = node.center.y + this.bodyCenter.y - this.originV.y;
+    const cz = node.center.z + this.bodyCenter.z - this.originV.z;
     this.sphere.center.set(cx, cy, cz);
     this.sphere.radius = node.boundRadius;
     if (!this.frustum.intersectsSphere(this.sphere)) {
@@ -219,11 +236,15 @@ export class PlanetView {
     // for wide tiles, which over-splits). Off to the side, the bounding-sphere
     // distance (center minus radius) is the better (less optimistic) estimate,
     // so take the max of both — never below a small epsilon.
-    const relX = this.camPos.x - node.center.x;
-    const relY = this.camPos.y - node.center.y;
-    const relZ = this.camPos.z - node.center.z;
+    // (Absolute camera position minus the body's absolute tile center.)
+    const absCx = node.center.x + this.bodyCenter.x;
+    const absCy = node.center.y + this.bodyCenter.y;
+    const absCz = node.center.z + this.bodyCenter.z;
+    const relX = this.camPos.x - absCx;
+    const relY = this.camPos.y - absCy;
+    const relZ = this.camPos.z - absCz;
     const height = relX * node.nx + relY * node.ny + relZ * node.nz;
-    const dCenter = this.camPos.distanceTo(node.center);
+    const dCenter = this.camPos.distanceTo(this._absC.set(absCx, absCy, absCz));
     const d = Math.max(height, dCenter - node.boundRadius, 0.05);
     // Combined error: curvature sagitta in px, plus a screen-footprint term
     // (tile edge in px, rescaled so exceeding capPx counts as tauPx error).
@@ -256,7 +277,12 @@ export class PlanetView {
     const t = node.tile!;
     // Place the mesh in frame-relative space: double subtraction here is the
     // camera/origin-relative handoff to float32 (the only quantization step).
-    t.mesh.position.copy(node.center).sub(this.originV);
+    // Body center (moon orbit position) is included in the absolute->rel map.
+    t.mesh.position.set(
+      node.center.x + this.bodyCenter.x - this.originV.x,
+      node.center.y + this.bodyCenter.y - this.originV.y,
+      node.center.z + this.bodyCenter.z - this.originV.z,
+    );
     t.mesh.updateMatrix();
     t.mesh.visible = true;
     this.stats.visibleTiles++;
@@ -349,7 +375,13 @@ export class PlanetView {
       this.stats.built++;
       return t;
     }
-    const t = new TileMesh(node.face, node.level, node.ix, node.iy, this.radius, this.o.res, this.material);
+    const built = buildTileGeometry(
+      node.face, node.level, node.ix, node.iy, this.radius, this.o.res, this.body,
+    );
+    const t = new TileMesh(
+      node.face, node.level, node.ix, node.iy, this.radius, this.o.res, this.material,
+      built.geometry, built.center,
+    );
     this.root.add(t.mesh);
     this.stats.built++;
     return t;

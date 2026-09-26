@@ -8,6 +8,9 @@ import { Hud } from './hud';
 import { AutoPilot } from './testAuto';
 import { FlightModel } from './flight';
 import { WorldOrigin } from './world';
+import { makeMoonMaterial } from './moonMaterial';
+import { moonPosition } from './moonOrbit';
+import { MOON_BODY } from './moonBody';
 
 const R = 6_371_000; // Earth radius, meters
 
@@ -153,6 +156,23 @@ cloudUniforms.uSunDir = atmoUniforms.uSunDir; // share the sun object
 const clouds = makeCloudMesh(R, cloudUniforms);
 scene.add(clouds);
 if (urlParams.get('clouds') === '0') clouds.visible = false;
+
+// ---- Phase 9: the moon -------------------------------------------------
+// Reuses the ENTIRE cube-sphere LOD pipeline via the BodySurface interface:
+// same quadtree, same tile builder, same material pattern — a different
+// radius, height function (craters), and a Lambert no-atmosphere material.
+// ?moon=0 hides it (A/B diagnosis).
+const R_MOON = 1_737_000;
+const moonMaterial = makeMoonMaterial(atmoUniforms.uSunDir);
+const moonView = new PlanetView(scene, R_MOON, moonMaterial, {
+  maxLevel: 20,
+  tauPx: 2,
+  res: 65,
+  cacheSize: 300,
+}, MOON_BODY);
+if (urlParams.get('moon') === '0') moonView.root.visible = false;
+// sim clock for the orbit (performance.now-based; deterministic per session)
+const t0Sim = performance.now() / 1000;
 
 const hud = new Hud('hud');
 const absCam = new THREE.Vector3(0, 0, R * 4); // absolute camera position
@@ -403,6 +423,8 @@ renderer.setAnimationLoop(() => {
 
     planet.update(rig.camera, world.origin, window.innerHeight);
     sea.update(rig.camera, world.origin, window.innerHeight);
+    // Moon: place tiles at center + bodyCenter - origin (all double).
+    moonView.update(rig.camera, world.origin, window.innerHeight);
   }
   // Keep distant scenery centered on the camera (stars are only directions —
   // recenter them each frame so they never sit behind the far plane).
@@ -418,6 +440,12 @@ renderer.setAnimationLoop(() => {
   cloudUniforms.uCamPos.value.copy(rig.camera.position);
   cloudUniforms.uOrigin.value.copy(world.origin);
   cloudUniforms.uTime.value = performance.now() / 1000;
+  // Moon orbit: the absolute position goes into the LOD placement math and
+  // the group sits at bodyCenter - origin in frame space. The moon is NOT
+  // affected by floating-origin rebases in any special way — tiles are
+  // placed per-frame from absolute centers like Earth's.
+  moonPosition(performance.now() / 1000 - t0Sim, moonView.bodyCenter);
+  moonView.root.position.copy(moonView.bodyCenter).sub(world.origin);
   // sea material shares the terrain's uniform objects (updated above); only
   // its own time / viewport uniforms need ticking here.
   seaMaterial.uniforms.uTime.value = performance.now() / 1000;
@@ -430,6 +458,7 @@ renderer.setAnimationLoop(() => {
   const s = planet.stats;
   const alt = Math.max(absCam.length() - R, 0);
   const look = rig.getLookAngles();
+  const moonDist = moonView.bodyCenter.length() - R_MOON;
   hud.update([
     ...errors.slice(-3),
     ...(autoLine ? [autoLine] : []),
@@ -438,6 +467,7 @@ renderer.setAnimationLoop(() => {
     ...(rebased > 0 ? [`rebase x${rebased} (total ${world.rebaseCount})`] : []),
     ...(probe ? [`probe ${probe()}`] : []),
     `alt ${fmtDist(alt)}  speed ${fmtDist(rig.currentSpeed)}/s  x${rig.speedMultiplier}`,
+    `moon dist ${fmtDist(moonDist)}  tiles ${moonView.stats.visibleTiles} L${moonView.stats.maxVisibleLevel}`,
     `pitch ${look.pitch.toFixed(1)}°  bank ${look.bank.toFixed(1)}°  hdg ${look.heading.toFixed(0)}°  level ${rig.autoLevel ? 'on(R)' : 'off(R)'}`,
     `revz ${(renderer as unknown as { capabilities: { reverseDepthBuffer: boolean } }).capabilities.reverseDepthBuffer ? 'ON' : 'off'}  aa ${urlParams.get('aa') === '0' ? 'off' : 'on'}`,
     `dbg cam=(${rig.camera.position.x.toFixed(0)},${rig.camera.position.y.toFixed(0)},${rig.camera.position.z.toFixed(0)}) org=(${world.origin.x.toFixed(0)},${world.origin.y.toFixed(0)},${world.origin.z.toFixed(0)})`,

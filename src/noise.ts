@@ -111,3 +111,12 @@ export function dirHash(dir: { x: number; y: number; z: number }, seed: number):
     seed,
   );
 }
+
+/**
+ * Public integer-lattice hash in [0,1) — the raw cell hash used by
+ * valueNoise3. Exposed for procedural scattering that addresses lattice
+ * cells directly (moon craters, future vegetation/rock placement).
+ */
+export function hash3i(x: number, y: number, z: number, seed: number): number {
+  return hash3(x, y, z, seed);
+}

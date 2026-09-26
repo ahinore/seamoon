@@ -1,6 +1,28 @@
 import * as THREE from 'three';
 import { terrainHeight, terrainColor, MAX_ELEV } from './terrain';
 
+/**
+ * A renderable celestial body's surface: the height/color pair the tile
+ * pipeline samples plus its max elevation (skirt depth). Earth and the moon
+ * (Phase 9) both implement this, so ONE quadtree/geometry pipeline serves
+ * every body ("the planet system with different parameters").
+ */
+export interface BodySurface {
+  /** Elevation above the body's sphere, meters. Unit dir in, spacing for LOD. */
+  height(x: number, y: number, z: number, spacing: number): number;
+  /** Linear RGB in [0,1]. */
+  color(x: number, y: number, z: number, h: number, slope: number): [number, number, number];
+  /** Max plausible elevation — skirt depth sizing. */
+  maxElev: number;
+}
+
+/** The default body (Earth) — preserves the pre-Phase-9 call signature. */
+export const EARTH_BODY: BodySurface = {
+  height: terrainHeight,
+  color: terrainColor,
+  maxElev: MAX_ELEV,
+};
+
 // Cube face definitions.
 // axis = outward normal of the face, u/v = tangents with cross(u, v) = axis.
 // This guarantees consistent CCW winding (front faces point outward).
@@ -70,6 +92,7 @@ export function buildTileGeometry(
   iy: number,
   radius: number,
   res: number,
+  body: BodySurface = EARTH_BODY,
 ): BuiltTile {
   const n = res;
   const nu = n + 2; // skirt ring included
@@ -94,7 +117,7 @@ export function buildTileGeometry(
   cubeToSphereDir(face, u1, v0, pB);
   const edge = pA.distanceTo(pB);
   const oneLevel = (edge * edge) / (2 * (res - 1) * (res - 1) * radius);
-  const skirtDepth = oneLevel * 20 + MAX_ELEV;
+  const skirtDepth = oneLevel * 20 + body.maxElev;
 
   // meters between adjacent lattice points — also drives LOD octave fading
   const spacing = edge / (n - 1);
@@ -116,7 +139,7 @@ export function buildTileGeometry(
       const k = J * nLat + I;
       // spacing of THIS tile's vertex grid — the height field fades its
       // finest octaves accordingly (anti-aliasing, kills LOD seam lakes)
-      hLat[k] = terrainHeight(dir.x, dir.y, dir.z, spacing);
+      hLat[k] = body.height(dir.x, dir.y, dir.z, spacing);
       dirLat[k * 3] = dir.x;
       dirLat[k * 3 + 1] = dir.y;
       dirLat[k * 3 + 2] = dir.z;
@@ -193,7 +216,7 @@ export function buildTileGeometry(
         const dU = Math.abs(hLat[(J + 1) * nLat + I] - h);
         const dD = Math.abs(h - hLat[(J - 1) * nLat + I]);
         const slope = Math.max(dR, dL, dU, dD) / spacing;
-        const c = terrainColor(hx, hy, hz, h, slope);
+        const c = body.color(hx, hy, hz, h, slope);
         colors[ptr] = c[0];
         colors[ptr + 1] = c[1];
         colors[ptr + 2] = c[2];
