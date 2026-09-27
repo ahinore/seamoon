@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { terrainHeight } from './terrain';
 import { moonHeight } from './moon';
-import { moonCenterFromParams } from './moonOrbit';
+import { moonCenterFromParams, MOON_ORBIT_R } from './moonOrbit';
+import { propagateKepler, elementsOf, SOI_MOON, type OrbitalElements } from './orbit';
 import type { CameraRig } from './cameraRig';
 import type { WorldOrigin } from './world';
 
@@ -84,7 +85,7 @@ export type FlightStatus = {
  * criteria: takeoff -> climb -> 90° turn -> approach -> flare -> landing.
  */
 export class FlightModel {
-  mode: 'manual' | 'fly' | 'lunar' = 'manual';
+  mode: 'manual' | 'fly' | 'lunar' | 'orbital' = 'manual';
   frozen = false;
 
   private readonly rig: CameraRig;
@@ -114,6 +115,22 @@ export class FlightModel {
   private prop = 2300;
   /** True when wheels/feet are on the surface. */
   private landed = false;
+
+  // --- orbital mode state (mode 'orbital', M9.5) ---
+  /** Primary body center (absolute): earth until the moon SOI handoff. */
+  private readonly primC = new THREE.Vector3();
+  /** Primary GM. */
+  private primMu = MU;
+  /** True after the SOI handoff to the moon. */
+  private inMoonSoi = false;
+  /** Osculating elements for the HUD. */
+  private el: OrbitalElements = { a: 0, e: 0, period: 0, rp: 0, ra: 0 };
+  /** Mission clock, s. */
+  private orbT = 0;
+  /** Coast time-warp factor (rail is analytic — warp is exact). */
+  private coastWarp = 6000;
+  /** Target apoapsis radius for the TLI burn, m. */
+  private tliRa = 344e6;
 
   // autopilot mission state
   private apPhase = 'off';
@@ -166,10 +183,34 @@ export class FlightModel {
       this.spawnH = 15000;
       this.spawnHdg = 90;
     }
+    if (q.get('demo') === 'orbital') {
+      this.mode = 'orbital';
+      this.apPhase = 'coast';
+      // Circular LEO at ?alt (default 200 km); spawn state (pos/vel) is
+      // derived in spawnStateInit's orbital branch. Spawn on the -X side:
+      // after one lap the TLI burn happens there, so the raised apoapsis
+      // points at the moon (frozen at +X with ?moonangle=0) and the transfer
+      // actually enters its SOI. Depot propellant for the TLI burn.
+      this.spawnDir.set(-1, 0, 0);
+      this.spawnH = num(q, 'alt', 200_000);
+      this.prop = 6000;
+      this.coastWarp = clamp(num(q, 'warp', 6000), 1, 50_000);
+      // Transfer apoapsis exactly at the moon's orbital radius: with the
+      // moon frozen at +X the transfer ellipse ends right on the moon
+      // center, so the craft plunges deep into the SOI — the boundary
+      // capture below converts it to a lunar ellipse long before lunar
+      // approach matters.
+      this.tliRa = MOON_ORBIT_R;
+      this.moonC.copy(moonCenterFromParams(q, performance.now() / 1000));
+      this.primC.set(0, 0, 0);
+      this.primMu = MU;
+    }
     this.spawnHdg = num(q, 'hdg', 90);
     const lat = num(q, 'lat', 5.5);
     const lon = num(q, 'lon', -104);
-    if (this.mode !== 'lunar') this.findSpawn(lat, lon);
+    // terrain spawn search is meaningless off-earth (orbital spawns on the
+    // rail, lunar on the moon's surface — both set their own state above)
+    if (this.mode === 'manual' || this.mode === 'fly') this.findSpawn(lat, lon);
     // Compute the spawn state but do NOT write it to the camera: the free
     // camera / AutoPilot owns the pose until flight mode is actually entered
     // (main.ts calls reset() explicitly at that point).
@@ -183,6 +224,29 @@ export class FlightModel {
 
   /** Position/attitude state at the spawn point (no camera write). */
   private spawnStateInit(): void {
+    if (this.mode === 'orbital') {
+      // circular LEO at spawnH above the start direction
+      this.pos.copy(this.spawnDir).multiplyScalar(R + this.spawnH);
+      const vc = Math.sqrt(MU / (R + this.spawnH));
+      // prograde tangent: spawnDir x worldY (verified against elementsOf:
+      // yields e<1e-6 circular)
+      this.vel.copy(this.spawnDir).cross(this.WORLD_Y).normalize().multiplyScalar(vc);
+      this.q.identity();
+      this.thr = 0;
+      this.frozen = false;
+      this.note = '';
+      this.orbT = 0;
+      this.prop = 6000;
+      this.inMoonSoi = false;
+      this.primC.set(0, 0, 0);
+      this.primMu = MU;
+      this.apPhase = 'coast';
+      // Seed the osculating elements so the coast-warp clamp (TLI exactly on
+      // the spawn node) is valid from the very first frame — at high warp a
+      // single unclamped step could overshoot the whole parking period.
+      elementsOf(_oR.copy(this.pos), this.vel, MU, this.el);
+      return;
+    }
     if (this.mode === 'lunar') {
       // lander: engine-down upright, feet 15 km above the surface
       const hSurf = moonHeight(1, 0, 0);
@@ -241,7 +305,7 @@ export class FlightModel {
    * Grid-search the flattest land cell around (lat, lon) for the airfield:
    * terrainHeight is cheap (µs), so sampling ~900 cells + slope probes is
    * fine at spawn time. Requires h > 20 m (dry land, clear of the beach
-   * band) and prefers low-elevation plains.
+   * band) and prefers low-elevation plains. (Lunar/orbital spawns skip this.)
    */
   private findSpawn(latDeg: number, lonDeg: number): void {
     const lat0 = latDeg * DEG;
@@ -306,6 +370,11 @@ export class FlightModel {
     if (this.mode === 'lunar') {
       this.lunarStep(dt);
       this.writeCameraLunar();
+      return;
+    }
+    if (this.mode === 'orbital') {
+      this.orbitalStep(dt);
+      this.writeCameraOrbital();
       return;
     }
     if (this.mode === 'fly') this.autopilot(dt);
@@ -483,6 +552,162 @@ export class FlightModel {
   }
 
   // ------------------------------------------------------------------ physics
+
+  /**
+   * Orbital mechanics step (Phase 9 M9.5, patched conics).
+   *
+   * Coasting: propagate on the Kepler rail (analytic, exact at any warp).
+   * Thrusting (TLI): numeric kick because the rail is only valid inertially.
+   * SOI handoff: when the moon's SOI sphere (66.2 Mm) is entered the primary
+   * switches to the moon — state stays untouched (absolute frame, moon
+   * frozen), only the gravity well changes.
+   */
+  private orbitalStep(dt: number): void {
+    // Coast time-warp: the rail is analytic, so propagation is exact at any
+    // dt; warp scales the mission clock too so phase timers (TLI after one
+    // parking-orbit period) fire in demo-realistic wall time.
+    let wdt = dt * this.coastWarp;
+    // clamp the final coast step so TLI ignites exactly on the node (the
+    // spawn point: the raise ellipse's apoapsis then faces the frozen moon)
+    if (this.apPhase === 'coast' && this.el.period > 0) {
+      wdt = Math.min(wdt, Math.max(this.el.period - this.orbT, 0));
+    }
+    this.orbT += wdt;
+
+    // --- coast (analytic Kepler rail, exact at any wdt) ------------------
+    // MUST run before the phase checks: on the TLI frame the last clamped
+    // slice propagates first, so the impulse fires exactly ON the spawn
+    // node. Burning before propagation would land up to one warp-step —
+    // hundreds of degrees of parking arc — short of the node, rotating the
+    // whole transfer ellipse away from the moon.
+    if (this.apPhase !== 'tli') {
+      const rail = _oRail.copy(this.pos).sub(this.primC);
+      const railV = _oRailV.copy(this.vel);
+      propagateKepler(rail, railV, this.primMu, wdt, _oNew, _oNewV);
+      this.pos.copy(this.primC).add(_oNew);
+      this.vel.copy(_oNewV);
+    }
+
+    // --- mission phases -------------------------------------------------
+    if (this.apPhase === 'coast') {
+      // First coast: verify the rail (one lap) then ignite TLI at apoapsis
+      // of the raise ellipse. For the demo we ignite after one full period.
+      if (this.orbT >= this.el.period && this.el.period > 0) {
+        this.apPhase = 'tli';
+        this.orbT = 0;
+      }
+    }
+
+    const r = _oR.copy(this.pos).sub(this.primC);
+    const rm = r.length();
+
+    // --- SOI handoff (earth -> moon) ------------------------------------
+    if (!this.inMoonSoi) {
+      const dMoon = this.pos.distanceTo(this.moonC);
+      if (dMoon < SOI_MOON) {
+        this.inMoonSoi = true;
+        this.primC.copy(this.moonC);
+        this.primMu = MU_MOON;
+        // Patched-conic capture at the SOI boundary: replace the incoming
+        // hyperbolic velocity (v∞ ≈ 560 m/s, mostly RADIAL — the transfer
+        // ellipse ends on the moon center) with the apolune speed of the
+        // target ellipse (rp 500 km altitude, ra = entry radius), directed
+        // prograde-tangential. A retrograde-only burn along the incoming
+        // velocity would preserve the radial component and drive the new
+        // orbit's periapsis inside the moon — the tangential replacement is
+        // the clean impulsive capture. The moon is frozen in this demo
+        // (?moonangle), so absolute velocity is already moon-relative.
+        const rRel = _oR.copy(this.pos).sub(this.moonC);
+        const rr = rRel.length();
+        const aT = (R_MOON + 500_000 + rr) / 2;
+        const vTgt = Math.sqrt(MU_MOON * (2 / rr - 1 / aT));
+        // prograde tangential unit vector: ĥ × r̂ with h = r × v
+        const hV = _oV.copy(rRel).cross(this.vel);
+        const tDir = _oUp.copy(hV).normalize().cross(rRel).normalize();
+        const dv = _oB1.copy(tDir).multiplyScalar(vTgt).sub(this.vel).length();
+        if (this.prop > 10) {
+          this.vel.copy(tDir).multiplyScalar(vTgt);
+          const ve = this.THRUST_LANDER / this.BURN_RATE;
+          this.prop = Math.max(0, this.prop - (this.mLand + this.prop) * (1 - Math.exp(-dv / ve)));
+          this.apPhase = 'lunar-orbit';
+          this.note = 'CAPTURED';
+        } else {
+          this.apPhase = 'soi-moon';
+          this.note = 'SOI MOON';
+        }
+      }
+    }
+
+    // --- thrust (impulse only — the coast above already propagated) ------
+    if (this.apPhase === 'tli') {
+      // Patched-conic TLI: impulsive prograde burn from the circular parking
+      // speed to the transfer-ellipse speed at this radius (vis-viva). KSP-
+      // style instant maneuver — a finite burn with the lander engine would
+      // smear over ~50° of arc and miss the moon entirely. Propellant via
+      // Tsiolkovsky with the lander engine's effective exhaust velocity
+      // (ve = F/mdot). Ignition is exactly on the spawn node (mission clock
+      // = one parking period, enforced by the wdt clamp), so the raised
+      // apoapsis faces the frozen moon.
+      const vDir = _oV.copy(this.vel).normalize();
+      const vTgt = Math.sqrt(this.primMu * (2 / rm - 1 / ((this.tliRa + rm) / 2)));
+      const dv = vTgt - this.vel.length();
+      if (dv <= 0 || this.prop <= 10) {
+        this.apPhase = 'trans-lunar';
+        this.note = this.prop <= 10 ? 'NO PROP' : 'TLI DONE';
+      } else {
+        this.vel.addScaledVector(vDir, dv);
+        const ve = this.THRUST_LANDER / this.BURN_RATE;
+        this.prop = Math.max(0, this.prop - (this.mLand + this.prop) * (1 - Math.exp(-dv / ve)));
+        this.apPhase = 'trans-lunar';
+        this.note = 'TLI DONE';
+      }
+    }
+
+    // --- post-step: elements, altitude, ground guard --------------------
+    const r2 = _oR.copy(this.pos).sub(this.primC);
+    elementsOf(r2, this.vel, this.primMu, this.el);
+    const up2 = _oUp.copy(r2).multiplyScalar(1 / r2.length());
+    const alt = r2.length() - (this.primMu === MU ? R : R_MOON);
+    this.tAgl = Math.max(alt, 0);
+    this.tVs = this.vel.dot(up2);
+    this.tGs = this.vel.length();
+    this.tIas = 0;
+    // ground/crash guard (never expected on a clean orbit, but a bad burn
+    // can drop periapsis into the planet)
+    const surfR = (this.primMu === MU ? R : R_MOON) + (this.primMu === MU
+      ? terrainHeight(up2.x, up2.y, up2.z)
+      : moonHeight(up2.x, up2.y, up2.z));
+    if (r2.length() < surfR) {
+      this.frozen = true;
+      this.note = 'IMPACT';
+      this.apPhase = 'off';
+    }
+  }
+
+  /** Camera write for the orbital view: ride slightly behind/above, look
+   * down the velocity vector tilted toward the surface so the planet fills
+   * the frame; near plane tracks altitude like the lander cam. */
+  private writeCameraOrbital(): void {
+    const up = _oUp.copy(this.pos).sub(this.primC).normalize();
+    // look direction: surface point below the craft (nadir). The camera
+    // itself sits 30 m "above" the craft along up so the HUD-style probe at
+    // the frame center samples the planet, not the vehicle.
+    const camAbs = _oB1.copy(this.pos).addScaledVector(up, 30);
+    this.world.rel(camAbs, this._tmp);
+    this.rig.camera.position.copy(this._tmp);
+    const belowAbs = _oB2.copy(this.pos).addScaledVector(up, -this.tAgl);
+    this.world.rel(belowAbs, _oRail);
+    this.rig.camera.up.copy(this.WORLD_Y);
+    this.rig.camera.lookAt(_oRail);
+    // near plane: altitude-tracking like the lander (0.25·AGL + floor),
+    // capped so the whole planet still fits inside far=2e9.
+    const near = clamp(this.tAgl * 0.25 + 0.3, 0.3, 1e5);
+    if (Math.abs(near - this.lastNear) / near > 0.3 || this.lastNear < 0) {
+      this.lastNear = near;
+      this.rig.camera.near = near;
+      this.rig.camera.updateProjectionMatrix();
+    }
+  }
 
   private integrate(dt: number): void {
     const up = this._up.copy(this.pos).normalize();
@@ -745,7 +970,7 @@ export class FlightModel {
   getStatus(): FlightStatus {
     const la =
       this.mode === 'lunar' ? (this.landed ? 'TOUCHDOWN' : this.apPhase.toUpperCase()) :
-      this.mode === 'fly' ? this.apPhase.toUpperCase() : 'MANUAL';
+      this.mode === 'fly' || this.mode === 'orbital' ? this.apPhase.toUpperCase() : 'MANUAL';
     return {
       ias: this.tIas,
       gs: this.tGs,
@@ -767,6 +992,18 @@ export class FlightModel {
         `LANDER GS ${s.gs.toFixed(1)}  AGL ${fmtM(s.agl)}  VS ${s.vs >= 0 ? '+' : ''}${s.vs.toFixed(1)}  ` +
         `THR ${(s.thr * 100).toFixed(0)}%  PROP ${this.prop.toFixed(0)} kg  ` +
         `[${s.phase}${s.note ? ' ' + s.note : ''}]`
+      );
+    }
+    if (this.mode === 'orbital') {
+      const body = this.primMu === MU ? 'E' : 'M';
+      const el = this.el;
+      const apo = el.ra === Infinity ? '∞' : fmtM(el.ra - (body === 'E' ? R : R_MOON));
+      return (
+        `ORBIT(${body}) GS ${s.gs.toFixed(0)} m/s  ALT ${fmtM(s.agl)}  ` +
+        `a ${fmtM(el.a)}  e ${el.e.toFixed(4)}  ` +
+        `Pe ${fmtM(el.rp - (body === 'E' ? R : R_MOON))}  Ap ${apo}  ` +
+        `T ${el.period > 0 ? (el.period / 60).toFixed(1) + 'min' : '--'}  ` +
+        `PROP ${this.prop.toFixed(0)}kg  [${s.phase}${s.note ? ' ' + s.note : ''}]`
       );
     }
     return (
@@ -802,6 +1039,16 @@ const _lTUp = new THREE.Vector3();
 const _lVh = new THREE.Vector3();
 const _lB1 = new THREE.Vector3();
 const _lB2 = new THREE.Vector3();
+// dedicated orbital-mode temps (same no-aliasing rule as _l*).
+const _oR = new THREE.Vector3();
+const _oUp = new THREE.Vector3();
+const _oV = new THREE.Vector3();
+const _oRail = new THREE.Vector3();
+const _oRailV = new THREE.Vector3();
+const _oNew = new THREE.Vector3();
+const _oNewV = new THREE.Vector3();
+const _oB1 = new THREE.Vector3();
+const _oB2 = new THREE.Vector3();
 
 const smoothstep = (e0: number, e1: number, x: number): number => {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
