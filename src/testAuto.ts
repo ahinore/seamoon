@@ -2,9 +2,10 @@ import * as THREE from 'three';
 import type { CameraRig } from './cameraRig';
 import type { WorldOrigin } from './world';
 import { moonPositionAtAngle } from './moonOrbit';
+import { EARTH, MOON, localToAbsolute, eastAt } from './frames';
 
-const PLANET_R = 6_371_000;
-const R_MOON = 1_737_000;
+const PLANET_R = EARTH.radius;
+const R_MOON = MOON.radius;
 const DEG = Math.PI / 180;
 
 /**
@@ -72,40 +73,32 @@ export class AutoPilot {
 
     // ?body=moon relocates the spawn to lunar orbit (M9.2 test hook):
     // hover over the moon's surface at ?alt, nadir view, moon frozen at
-    // ?moonangle. The moon's absolute center comes from moonOrbit.
+    // ?moonangle. The moon's absolute center comes from the MOON frame
+    // (M9.6) — the same registry entry the renderer and physics use.
     if (q.get('body') === 'moon') {
       const ang = this.moonAngle ?? 0;
-      moonPositionAtAngle(ang, _moonC);
-      const lat2 = num(q, 'lat', 0) * Math.PI / 180;
-      const lon2 = num(q, 'lon', 0) * Math.PI / 180;
-      // radial position above the moon's near-side point (lat/lon on the
-      // moon's own frame aligned with the world axes for test simplicity)
-      _pos.set(
-        Math.cos(lat2) * Math.cos(lon2),
-        Math.sin(lat2),
-        Math.cos(lat2) * Math.sin(lon2),
-      ).multiplyScalar(R_MOON + this.alt0).add(_moonC);
+      moonPositionAtAngle(ang, MOON.center);
+      const lat2 = num(q, 'lat', 0);
+      const lon2 = num(q, 'lon', 0);
+      // radial position above the moon's near-side point via the SHARED
+      // local-frame helper (M9.6: one lat/lon convention for both bodies)
+      _pos.copy(localToAbsolute(MOON, lat2, lon2, this.alt0, _pos));
       this.world.origin.set(0, 0, 0);
       rig.camera.position.copy(_pos);
       rig.camera.up.set(0, 1, 0);
-      rig.camera.lookAt(_moonC);
+      rig.camera.lookAt(MOON.center);
       const pitchDeg2 = num(q, 'pitch', -90);
-      // Local east on the moon's test frame — same spherical convention as
-      // the earth branch below, so ?pitch/?hdg mean the same thing on both
-      // bodies. (?hdg was missing here entirely, which blocked any
-      // sun/star-alignment test from the moon.)
-      const eastM = _east.set(
-        -Math.sin(lon2),
-        0,
-        Math.cos(lat2) * Math.cos(lon2),
-      ).normalize();
+      // Local east on the moon via the SHARED convention (M9.6): ?pitch/?hdg
+      // mean the same thing on both bodies. (?hdg was missing here entirely,
+      // which blocked any sun/star-alignment test from the moon — M9.4.)
+      const eastM = eastAt(lat2, lon2, _east);
       if (pitchDeg2 !== -90) {
         const qTilt = _qt.setFromAxisAngle(eastM, (pitchDeg2 + 90) * Math.PI / 180);
         rig.camera.quaternion.premultiply(qTilt);
       }
       const hdgDeg2 = num(q, 'hdg', 0);
       if (hdgDeg2 !== 0) {
-        const upM = _east.copy(_pos).sub(_moonC).normalize();
+        const upM = _east.copy(_pos).sub(MOON.center).normalize();
         const qHdg = _qt.setFromAxisAngle(upM, -hdgDeg2 * Math.PI / 180);
         rig.camera.quaternion.premultiply(qHdg);
       }
@@ -119,13 +112,9 @@ export class AutoPilot {
     // used by terrain tests to hover over known landmasses.
     // ?pitch (deg) tilts the view up from nadir (0 = straight down, -90 =
     // horizon) — reproduces grazing-angle LOD screens.
-    const lat = num(q, 'lat', 0) * Math.PI / 180;
-    const lon = num(q, 'lon', 0) * Math.PI / 180;
-    const pos = _pos.set(
-      Math.cos(lat) * Math.cos(lon),
-      Math.sin(lat),
-      Math.cos(lat) * Math.sin(lon),
-    ).multiplyScalar(PLANET_R + this.alt0);
+    const lat = num(q, 'lat', 0);
+    const lon = num(q, 'lon', 0);
+    const pos = _pos.copy(localToAbsolute(EARTH, lat, lon, this.alt0, _pos));
     this.world.origin.set(0, 0, 0);
     rig.camera.position.copy(pos);
     rig.camera.up.set(0, 1, 0);
@@ -135,11 +124,7 @@ export class AutoPilot {
     // manually-flown pose; ?level=0 disables auto-level (repro of manual flights).
     const pitchDeg = num(q, 'pitch', -90);
     rig.camera.lookAt(0, 0, 0);
-    const east = _east.set(
-      -Math.sin(lon),
-      0,
-      Math.cos(lat) * Math.cos(lon),
-    ).normalize();
+    const east = eastAt(lat, lon, _east);
     if (pitchDeg !== -90) {
       const qTilt = _qt.setFromAxisAngle(east, (pitchDeg + 90) * Math.PI / 180);
       rig.camera.quaternion.premultiply(qTilt);
@@ -281,7 +266,6 @@ export class AutoPilot {
 }
 
 const ORIGIN = new THREE.Vector3(0, 0, 0);
-const _moonC = new THREE.Vector3();
 const _abs = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
 const _pos = new THREE.Vector3();

@@ -3,14 +3,15 @@ import { terrainHeight } from './terrain';
 import { moonHeight } from './moon';
 import { moonCenterFromParams, MOON_ORBIT_R } from './moonOrbit';
 import { propagateKepler, elementsOf, SOI_MOON, type OrbitalElements } from './orbit';
+import { EARTH, MOON, nearestFrame, localToAbsolute, eastAt } from './frames';
 import type { CameraRig } from './cameraRig';
 import type { WorldOrigin } from './world';
 
 const DEG = Math.PI / 180;
-const R = 6_371_000; // planet radius (sea level), m
-const MU = 3.986004418e14; // GM, m^3/s^2 — gravity = MU/r^2 (g0 = 9.82 at R)
-const R_MOON = 1_737_000; // moon radius, m
-const MU_MOON = 4.9048e12; // moon GM (g = 1.62 m/s^2 at the surface)
+const R = EARTH.radius;
+const MU = EARTH.mu;
+const R_MOON = MOON.radius;
+const MU_MOON = MOON.mu;
 
 // --- aircraft parameters (light single, arcade-tuned) ---
 const MASS = 1200; // kg
@@ -176,8 +177,10 @@ export class FlightModel {
       this.mode = 'lunar';
       this.apPhase = 'descent';
       // Moon frozen at ?moonangle (default 0): the lander needs a static
-      // gravity well for the scripted descent.
+      // gravity well for the scripted descent. The frozen center ALSO seeds
+      // the MOON frame registry (M9.6) so every consumer agrees.
       this.moonC.copy(moonCenterFromParams(q, performance.now() / 1000));
+      MOON.center.copy(this.moonC);
       // spawn: 15 km above the surface, small horizontal drift, engine down
       this.spawnDir.set(1, 0, 0);
       this.spawnH = 15000;
@@ -202,6 +205,7 @@ export class FlightModel {
       // approach matters.
       this.tliRa = MOON_ORBIT_R;
       this.moonC.copy(moonCenterFromParams(q, performance.now() / 1000));
+      MOON.center.copy(this.moonC);
       this.primC.set(0, 0, 0);
       this.primMu = MU;
     }
@@ -248,9 +252,18 @@ export class FlightModel {
       return;
     }
     if (this.mode === 'lunar') {
-      // lander: engine-down upright, feet 15 km above the surface
-      const hSurf = moonHeight(1, 0, 0);
-      this.pos.set(1, 0, 0).multiplyScalar(R_MOON + hSurf + this.spawnH).add(this.moonC);
+      // lander: engine-down upright, feet 15 km above the TERRAIN. Spawn
+      // through the shared local-frame helper (M9.6): ?lat/?lon (default the
+      // near-side point) on the MOON frame + terrain height on top.
+      const q2 = new URLSearchParams(location.search);
+      const latL = num(q2, 'lat', 0);
+      const lonL = num(q2, 'lon', 0);
+      const hSurf = moonHeight(
+        Math.cos(latL * DEG) * Math.cos(lonL * DEG),
+        Math.sin(latL * DEG),
+        Math.cos(latL * DEG) * Math.sin(lonL * DEG),
+      );
+      this.pos.copy(localToAbsolute(MOON, latL, lonL, hSurf + this.spawnH, this.pos));
       // slight HORIZONTAL drift to null out (east at spawn (1,0,0) is -Z:
       // east = worldY x up = (0,1,0)x(1,0,0) = (0,0,-1))
       this.vel.set(0, 0, -6);
@@ -275,7 +288,7 @@ export class FlightModel {
     const up = this._up.copy(this.spawnDir);
     const lon = Math.atan2(this.spawnDir.z, this.spawnDir.x);
     const lat = Math.asin(clamp(this.spawnDir.y, -1, 1));
-    const east = this._east.set(-Math.sin(lon), 0, Math.cos(lat) * Math.cos(lon)).normalize();
+    const east = eastAt(lat / DEG, lon / DEG, this._east);
     this._north.crossVectors(up, east).normalize().negate(); // up×east = -north
     const fwd = this._tmp
       .copy(this._north)

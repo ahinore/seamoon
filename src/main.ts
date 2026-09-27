@@ -11,8 +11,9 @@ import { WorldOrigin } from './world';
 import { makeMoonMaterial } from './moonMaterial';
 import { moonPosition, moonPositionAtAngle } from './moonOrbit';
 import { MOON_BODY } from './moonBody';
+import { EARTH, MOON, nearestFrame } from './frames';
 
-const R = 6_371_000; // Earth radius, meters
+const R = EARTH.radius;
 
 // Surface errors in the HUD so they are observable via DOM text reads.
 const errors: string[] = [];
@@ -170,7 +171,7 @@ if (urlParams.get('clouds') === '0') clouds.visible = false;
 // same quadtree, same tile builder, same material pattern — a different
 // radius, height function (craters), and a Lambert no-atmosphere material.
 // ?moon=0 hides it (A/B diagnosis).
-const R_MOON = 1_737_000;
+const R_MOON = MOON.radius;
 const moonMaterial = makeMoonMaterial(atmoUniforms.uSunDir);
 const moonView = new PlanetView(scene, R_MOON, moonMaterial, {
   maxLevel: 20,
@@ -185,12 +186,11 @@ const t0Sim = performance.now() / 1000;
 const hud = new Hud('hud');
 const absCam = new THREE.Vector3(0, 0, R * 4); // absolute camera position
 let rigRef: CameraRig | null = null;
-// Nearest-body reference (Phase 9 M9.2): 'earth' or 'moon'. All single-body
-// references (altitude for near-plane/speed, zenith for auto-level) resolve
-// against the CURRENT nearest body so lunar flight behaves correctly.
+// Nearest-body reference (Phase 9 M9.2, registry-driven since M9.6): all
+// single-body references (altitude for near-plane/speed, zenith for
+// auto-level) resolve against the CURRENT nearest body's frame.
 let nearBody: 'earth' | 'moon' = 'earth';
 const _bodyUp = new THREE.Vector3();
-const _moonAbsC = new THREE.Vector3();
 const rig = new CameraRig(
   renderer.domElement,
   new THREE.Vector3(0, 0, R * 4), // start frame-relative == absolute (origin 0)
@@ -200,17 +200,17 @@ const rig = new CameraRig(
   () => {
     if (!rigRef) return Number.POSITIVE_INFINITY;
     if (nearBody === 'moon') {
-      return Math.max(absCam.distanceTo(moonView.bodyCenter) - R_MOON, 0);
+      return Math.max(absCam.distanceTo(MOON.center) - R_MOON, 0);
     }
     return Math.max(absCam.length() - R, 0);
   },
   // Local zenith: radial away from the nearest body's center. With a floating
-  // origin the planet center sits at -origin (earth) or bodyCenter-origin
+  // origin the planet center sits at -origin (earth) or MOON.center-origin
   // (moon) in frame space; "up" points away from that center.
   () => {
     if (nearBody === 'moon') {
       _bodyUp.copy(rigRef ? rigRef.camera.position : _up.set(0, 0, 0));
-      _bodyUp.add(world.origin).sub(moonView.bodyCenter);
+      _bodyUp.add(world.origin).sub(MOON.center);
       return _bodyUp.normalize();
     }
     return _up.copy(world.origin).normalize();
@@ -474,24 +474,21 @@ renderer.setAnimationLoop(() => {
   cloudUniforms.uCamPos.value.copy(rig.camera.position);
   cloudUniforms.uOrigin.value.copy(world.origin);
   cloudUniforms.uTime.value = performance.now() / 1000;
-  // Moon orbit: the absolute position goes into the LOD placement math and
-  // the group sits at bodyCenter - origin in frame space. ?moonangle=<deg>
-  // (test hook) freezes the orbit at a fixed angle.
+  // Moon orbit: the absolute position is written into the MOON frame center
+  // (M9.6: the registry entry is the single source of truth — PlanetView,
+  // flight physics and the nearest-body rule all read this one vector).
+  // ?moonangle=<deg> (test hook) freezes the orbit at a fixed angle.
   if (auto.moonAngle !== null) {
-    moonPositionAtAngle(auto.moonAngle, moonView.bodyCenter);
+    moonPositionAtAngle(auto.moonAngle, MOON.center);
   } else {
-    moonPosition(performance.now() / 1000 - t0Sim, moonView.bodyCenter);
+    moonPosition(performance.now() / 1000 - t0Sim, MOON.center);
   }
+  moonView.bodyCenter.copy(MOON.center);
   moonView.root.position.copy(moonView.bodyCenter).sub(world.origin);
   // Nearest-body selection (M9.2): whichever surface the camera is closest
-  // to (SOI handoff for the future orbit mechanics; today it steers the
-  // rig's altitude/zenith references). Hysteresis via simple nearest-wins.
-  {
-    const dEarth = absCam.length() - R;
-    _moonAbsC.copy(absCam).sub(moonView.bodyCenter);
-    const dMoon = _moonAbsC.length() - R_MOON;
-    nearBody = dMoon < dEarth ? 'moon' : 'earth';
-  }
+  // to (SOI handoff reference; steers the rig's altitude/zenith). The rule
+  // lives in frames.ts (M9.6) — one definition for the whole app.
+  nearBody = nearestFrame(absCam);
   // sea material shares the terrain's uniform objects (updated above); only
   // its own time / viewport uniforms need ticking here.
   seaMaterial.uniforms.uTime.value = performance.now() / 1000;
@@ -504,10 +501,10 @@ renderer.setAnimationLoop(() => {
   const s = planet.stats;
   // HUD altitude is relative to the NEAREST body (lunar hover shows lunar alt)
   const alt = nearBody === 'moon'
-    ? Math.max(absCam.distanceTo(moonView.bodyCenter) - R_MOON, 0)
+    ? Math.max(absCam.distanceTo(MOON.center) - R_MOON, 0)
     : Math.max(absCam.length() - R, 0);
   const look = rig.getLookAngles();
-  const moonDist = moonView.bodyCenter.length() - R_MOON;
+  const moonDist = MOON.center.length() - R_MOON;
   hud.update([
     ...errors.slice(-3),
     ...(autoLine ? [autoLine] : []),
