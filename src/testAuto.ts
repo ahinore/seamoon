@@ -90,19 +90,24 @@ export class AutoPilot {
       rig.camera.up.set(0, 1, 0);
       rig.camera.lookAt(_moonC);
       const pitchDeg2 = num(q, 'pitch', -90);
+      // Local east on the moon's test frame — same spherical convention as
+      // the earth branch below, so ?pitch/?hdg mean the same thing on both
+      // bodies. (?hdg was missing here entirely, which blocked any
+      // sun/star-alignment test from the moon.)
+      const eastM = _east.set(
+        -Math.sin(lon2),
+        0,
+        Math.cos(lat2) * Math.cos(lon2),
+      ).normalize();
       if (pitchDeg2 !== -90) {
-        const upM = _east.copy(_pos).sub(_moonC).normalize();
-        // tilt around an axis perpendicular to the view dir and up
-        const axis = _qt.setFromAxisAngle(
-          _east.crossVectors(upM, rig.camera.position.clone().sub(_moonC)).normalize(),
-          0,
-        );
-        void axis;
-        // simple: rotate the nadir quaternion around the local east-ish axis
-        const eastM = _east.set(0, 1, 0).cross(upM).normalize();
-        if (eastM.lengthSq() < 0.5) eastM.set(1, 0, 0);
         const qTilt = _qt.setFromAxisAngle(eastM, (pitchDeg2 + 90) * Math.PI / 180);
         rig.camera.quaternion.premultiply(qTilt);
+      }
+      const hdgDeg2 = num(q, 'hdg', 0);
+      if (hdgDeg2 !== 0) {
+        const upM = _east.copy(_pos).sub(_moonC).normalize();
+        const qHdg = _qt.setFromAxisAngle(upM, -hdgDeg2 * Math.PI / 180);
+        rig.camera.quaternion.premultiply(qHdg);
       }
       if (q.get('level') === '0') rig.autoLevel = false;
       this.homePos.copy(_pos);

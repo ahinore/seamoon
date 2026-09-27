@@ -337,47 +337,156 @@ export function makeSeaMaterial(shared: {
   });
 }
 
-/** Simple background star points (placeholder until Phase 9). */
-export function makeStars(count = 2500, radius = 6e8): THREE.Points {
+/**
+ * Starfield (Phase 9 M9.4). Deterministic (seeded PRNG — same sky every
+ * session), magnitude-weighted (few bright / many dim, power-law), with
+ * blackbody-ish color classes and a density enhancement along a galactic
+ * band. Points are centered on the camera every frame (directions only).
+ * ?starsize=<px> overrides the base point size (diagnosis/A-B).
+ */
+function urlStarSize(): number {
+  const v = Number(new URLSearchParams(location.search).get('starsize') ?? '1.6');
+  return Number.isFinite(v) && v > 0 ? Math.min(v, 64) : 1.6;
+}
+export function makeStars(count = 6000, radius = 6e8): THREE.Points {
+  // mulberry32 — tiny deterministic PRNG; the sky must not reshuffle on
+  // every reload (stars are "catalog" objects, not effects).
+  const rnd = (() => {
+    let s = 0x9e3779b9;
+    return () => {
+      s |= 0; s = (s + 0x6d2b79f5) | 0;
+      let t = Math.imul(s ^ (s >>> 15), 1 | s);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  })();
   const pos = new Float32Array(count * 3);
   const mag = new Float32Array(count);
+  const col = new Float32Array(count * 3);
   const v = new THREE.Vector3();
-  for (let i = 0; i < count; i++) {
-    // uniform direction sampling
-    const z = Math.random() * 2 - 1;
-    const phi = Math.random() * Math.PI * 2;
+  // Galactic band plane: an arbitrary fixed tilt (not tied to any real
+  // catalog — visual density cue only). Stars concentrate near this plane.
+  const bn = v.set(0.2, 0.95, 0.35).normalize().clone();
+  const w = new THREE.Vector3();
+  let i = 0;
+  let guard = 0;
+  while (i < count && guard++ < count * 20) {
+    const z = rnd() * 2 - 1;
+    const phi = rnd() * Math.PI * 2;
     const r = Math.sqrt(1 - z * z);
-    v.set(r * Math.cos(phi), z, r * Math.sin(phi)).multiplyScalar(radius);
+    v.set(r * Math.cos(phi), z, r * Math.sin(phi));
+    // Band acceptance: uniform background + gaussian concentration around
+    // the band plane (sigma ~0.18 rad). Rejection sampling keeps directions
+    // exactly uniform where the band adds nothing.
+    const bandAng = Math.asin(Math.min(Math.abs(v.dot(bn)), 1));
+    const weight = 1 + 2.8 * Math.exp(-(bandAng * bandAng) / (0.18 * 0.18));
+    if (rnd() > weight / 3.8) continue;
+    v.multiplyScalar(radius);
     pos[i * 3] = v.x;
     pos[i * 3 + 1] = v.y;
     pos[i * 3 + 2] = v.z;
-    mag[i] = 0.35 + Math.random() * 0.65;
+    // Magnitude: power law — most stars dim, a handful bright.
+    const m = Math.pow(rnd(), 4);
+    mag[i] = m;
+    // Color class by "temperature": blue-white / white / yellow / orange /
+    // red, weighted toward white-yellow like the real sky.
+    const t = rnd();
+    let cr = 1, cg = 1, cb = 1;
+    if (t < 0.10) { cr = 0.72; cg = 0.82; cb = 1.0; }       // blue-white
+    else if (t < 0.55) { cr = 1.0; cg = 0.98; cb = 0.95; }  // white
+    else if (t < 0.80) { cr = 1.0; cg = 0.93; cb = 0.80; }  // yellow
+    else if (t < 0.94) { cr = 1.0; cg = 0.82; cb = 0.62; }  // orange
+    else { cr = 1.0; cg = 0.72; cb = 0.58; }                // red
+    col[i * 3] = cr;
+    col[i * 3 + 1] = cg;
+    col[i * 3 + 2] = cb;
+    i++;
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('aMag', new THREE.BufferAttribute(mag, 1));
+  g.setAttribute('aCol', new THREE.BufferAttribute(col, 3));
   const m = new THREE.ShaderMaterial({
-    uniforms: { uSize: { value: 1.6 } },
+    uniforms: { uSize: { value: urlStarSize() } },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
     vertexShader: /* glsl */ `
       #include <common>
       uniform float uSize;
       attribute float aMag;
+      attribute vec3 aCol;
       varying float vMag;
+      varying vec3 vCol;
       void main() {
         vMag = aMag;
+        vCol = aCol;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = uSize;
+        // Bright stars are larger points (size grows with squared magnitude).
+        gl_PointSize = uSize * (0.8 + 2.6 * aMag * aMag);
       }
     `,
     fragmentShader: /* glsl */ `
       varying float vMag;
+      varying vec3 vCol;
       void main() {
-        gl_FragColor = vec4(vec3(0.8 + 0.2 * vMag), 1.0);
+        // Round point sprite (fade the square edge), additive brightness.
+        vec2 d = gl_PointCoord * 2.0 - 1.0;
+        float fall = 1.0 - smoothstep(0.6, 1.0, length(d));
+        float b = 0.30 + 1.5 * vMag * vMag;
+        gl_FragColor = vec4(vCol * b * fall, 1.0);
         #include <colorspace_fragment>
       }
     `,
   });
   const pts = new THREE.Points(g, m);
   pts.frustumCulled = false;
+  pts.renderOrder = -10;
   return pts;
+}
+
+/**
+ * Sun disc (Phase 9 M9.4): a camera-facing quad with an analytic disk and a
+ * subtle glare, positioned along the sun direction every frame (inside the
+ * far plane). Depth-tested, so the planet occludes it naturally; additive so
+ * the atmosphere glow layers over it. Physical angular radius from Earth is
+ * ~0.267 deg (0.00465 rad) — the on-screen size comes out right without any
+ * texture.
+ */
+export function makeSunDisc(distance = 1e9): THREE.Mesh {
+  const angR = 0.00465;             // solar angular radius (rad) from 1 AU
+  const halfRad = angR * 5;         // quad half-size: disk + glare margin
+  const size = halfRad * distance;
+  const g = new THREE.PlaneGeometry(size * 2, size * 2);
+  const m = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv * 2.0 - 1.0;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        float r = length(vUv);                       // 1.0 at quad edge
+        float edge = 1.0 / 5.0;                      // disk edge (angR/halfRad)
+        float disk = 1.0 - smoothstep(edge - 0.02, edge + 0.02, r);
+        float glare = exp(-r * 8.0) * 0.25;          // soft halo
+        float a = disk + glare;
+        if (a <= 0.001) discard;
+        // Limb darkening: hotter white core, warmer edge.
+        vec3 col = mix(vec3(1.0, 0.96, 0.90), vec3(1.0, 0.85, 0.55), smoothstep(0.0, edge * 1.4, r));
+        gl_FragColor = vec4(col * a, 1.0);
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+  const mesh = new THREE.Mesh(g, m);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -5; // transparent pass: stars, then sun, then atmo glow
+  return mesh;
 }

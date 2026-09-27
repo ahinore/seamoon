@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CameraRig } from './cameraRig';
 import { PlanetView } from './cubeSphereLod';
-import { makePlanetMaterial, makeSeaMaterial, makeStars } from './materials';
+import { makePlanetMaterial, makeSeaMaterial, makeStars, makeSunDisc } from './materials';
 import { makeAtmosphereMesh, makeAtmosphereUniforms } from './atmosphere';
 import { makeCloudMesh, makeCloudUniforms } from './clouds';
 import { Hud } from './hud';
@@ -128,8 +128,16 @@ const sea = new PlanetView(scene, R, seaMaterial, {
 if (urlParams.get('sea') === '0') {
   sea.root.visible = false;
 }
-const stars = makeStars(2500, 6e8);
+const stars = makeStars(6000, 6e8);
 scene.add(stars);
+// Sun disc (M9.4): placed along sunDir at a fixed camera distance each frame
+// (inside the far plane; stars are at 6e8 so the sun sits well inside them).
+// ?sun=0 hides it (A/B diagnosis).
+const SUN_DIST = 5e8;
+const sunDisc = makeSunDisc(SUN_DIST);
+scene.add(sunDisc);
+if (urlParams.get('sun') === '0') sunDisc.visible = false;
+const _sunPos = new THREE.Vector3();
 
 // Phase 5: atmosphere shell. The mesh sits at the frame-relative planet
 // center (-origin each frame) and its shader takes the frame-relative
@@ -450,6 +458,11 @@ renderer.setAnimationLoop(() => {
   // Keep distant scenery centered on the camera (stars are only directions —
   // recenter them each frame so they never sit behind the far plane).
   stars.position.copy(rig.camera.position);
+  // Sun disc: camera-centered quad along the fixed sun direction, oriented
+  // to face the camera (billboard). far = 2e9 keeps 5e8 inside the frustum.
+  _sunPos.copy(rig.camera.position).addScaledVector(sunDir, SUN_DIST);
+  sunDisc.position.copy(_sunPos);
+  sunDisc.quaternion.copy(rig.camera.quaternion);
 
   // Atmosphere shell follows the planet center (-origin in frame space) and
   // feeds the shader the camera pose in the same frame. The terrain material
