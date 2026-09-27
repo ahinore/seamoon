@@ -1,11 +1,15 @@
 import * as THREE from 'three';
 import { terrainHeight } from './terrain';
+import { moonHeight } from './moon';
+import { moonCenterFromParams } from './moonOrbit';
 import type { CameraRig } from './cameraRig';
 import type { WorldOrigin } from './world';
 
 const DEG = Math.PI / 180;
 const R = 6_371_000; // planet radius (sea level), m
 const MU = 3.986004418e14; // GM, m^3/s^2 — gravity = MU/r^2 (g0 = 9.82 at R)
+const R_MOON = 1_737_000; // moon radius, m
+const MU_MOON = 4.9048e12; // moon GM (g = 1.62 m/s^2 at the surface)
 
 // --- aircraft parameters (light single, arcade-tuned) ---
 const MASS = 1200; // kg
@@ -80,7 +84,7 @@ export type FlightStatus = {
  * criteria: takeoff -> climb -> 90° turn -> approach -> flare -> landing.
  */
 export class FlightModel {
-  mode: 'manual' | 'fly' = 'manual';
+  mode: 'manual' | 'fly' | 'lunar' = 'manual';
   frozen = false;
 
   private readonly rig: CameraRig;
@@ -96,6 +100,20 @@ export class FlightModel {
   private readonly spawnDir = new THREE.Vector3(0, 0, 1);
   private spawnH = 0;
   private spawnHdg = 90;
+
+  // --- lunar lander state (mode 'lunar') ---
+  /** Moon center (absolute) at mission start; the moon is frozen during the mission. */
+  private readonly moonC = new THREE.Vector3();
+  /** Lander dry+prop mass, kg. */
+  private mLand = 4200;
+  /** Descent engine max thrust, N (DSE-class). */
+  private readonly THRUST_LANDER = 45000;
+  /** Propellant burn rate at full throttle, kg/s. */
+  private readonly BURN_RATE = 8;
+  /** Propellant remaining, kg. */
+  private prop = 2300;
+  /** True when wheels/feet are on the surface. */
+  private landed = false;
 
   // autopilot mission state
   private apPhase = 'off';
@@ -137,10 +155,21 @@ export class FlightModel {
       this.mode = 'fly';
       this.apPhase = 'takeoff';
     }
+    if (q.get('demo') === 'lunar') {
+      this.mode = 'lunar';
+      this.apPhase = 'descent';
+      // Moon frozen at ?moonangle (default 0): the lander needs a static
+      // gravity well for the scripted descent.
+      this.moonC.copy(moonCenterFromParams(q, performance.now() / 1000));
+      // spawn: 15 km above the surface, small horizontal drift, engine down
+      this.spawnDir.set(1, 0, 0);
+      this.spawnH = 15000;
+      this.spawnHdg = 90;
+    }
     this.spawnHdg = num(q, 'hdg', 90);
     const lat = num(q, 'lat', 5.5);
     const lon = num(q, 'lon', -104);
-    this.findSpawn(lat, lon);
+    if (this.mode !== 'lunar') this.findSpawn(lat, lon);
     // Compute the spawn state but do NOT write it to the camera: the free
     // camera / AutoPilot owns the pose until flight mode is actually entered
     // (main.ts calls reset() explicitly at that point).
@@ -154,6 +183,23 @@ export class FlightModel {
 
   /** Position/attitude state at the spawn point (no camera write). */
   private spawnStateInit(): void {
+    if (this.mode === 'lunar') {
+      // lander: engine-down upright, feet 15 km above the surface
+      const hSurf = moonHeight(1, 0, 0);
+      this.pos.set(1, 0, 0).multiplyScalar(R_MOON + hSurf + this.spawnH).add(this.moonC);
+      // slight HORIZONTAL drift to null out (east at spawn (1,0,0) is -Z:
+      // east = worldY x up = (0,1,0)x(1,0,0) = (0,0,-1))
+      this.vel.set(0, 0, -6);
+      this.q.identity();
+      this.thr = 0;
+      this.frozen = false;
+      this.note = '';
+      this.apT = 0;
+      this.prop = 2300;
+      this.landed = false;
+      this.apPhase = this.mode === 'lunar' ? 'descent' : 'off';
+      return;
+    }
     this.pos.copy(this.spawnDir).multiplyScalar(R + this.spawnH + GEAR_H);
     this.vel.set(0, 0, 0);
     this.thr = 0;
@@ -257,9 +303,183 @@ export class FlightModel {
       this.writeCamera();
       return;
     }
+    if (this.mode === 'lunar') {
+      this.lunarStep(dt);
+      this.writeCameraLunar();
+      return;
+    }
     if (this.mode === 'fly') this.autopilot(dt);
     this.integrate(dt);
     this.writeCamera();
+  }
+
+  // ------------------------------------------------------------- lunar lander
+
+  /**
+   * Lunar lander physics (Phase 9 M9.3): vacuum point-mass descent inside
+   * the moon's gravity well. No lift, no drag, no atmosphere; the engine
+   * gimbals to null horizontal drift, and the autopilot flies a fuel-aware
+   * descent-rate profile to a soft touchdown (<2.5 m/s vertical).
+   *
+   * Every scratch vector here comes from the dedicated _l* set: sharing the
+   * earth-flight temps made the autopilot silently overwrite the gravity
+   * accumulator once (VS froze) — never again.
+   */
+  private lunarStep(dt: number): void {
+    // Landed: pin to the surface forever (gravity would otherwise pull the
+    // lander back into the ground every step — post-touchdown sink bug).
+    if (this.landed) {
+      const rL = _lR.copy(this.pos).sub(this.moonC);
+      const upL = _lUp.copy(rL).normalize();
+      this.pos.copy(upL).multiplyScalar(R_MOON + moonHeight(upL.x, upL.y, upL.z)).add(this.moonC);
+      this.vel.set(0, 0, 0);
+      this.tAgl = 0;
+      this.tVs = 0;
+      this.tGs = 0;
+      return;
+    }
+    const r = _lR.copy(this.pos).sub(this.moonC);
+    const n = Math.max(r.length(), 1);
+    const up = _lUp.copy(r).multiplyScalar(1 / n);
+    const hSurf = moonHeight(up.x, up.y, up.z);
+    const agl = n - R_MOON - hSurf;
+
+    // gravity (moon GM) — dedicated accumulator, never aliased
+    const acc = _lAcc.copy(up).multiplyScalar(-MU_MOON / (n * n));
+
+    // controls: W/S throttle up/down
+    const c = this.rig.ctl;
+    const thrIn = (this.rig.isDown('KeyW') ? 0.5 : 0) - (this.rig.isDown('KeyS') ? 0.5 : 0);
+    this.thr = clamp(this.thr + thrIn * dt, 0, 1);
+
+    // autopilot: scripted descent when active (writes stick + throttle)
+    if (this.apPhase === 'descent') this.lunarAutopilot(agl, up);
+
+    // thrust: engine down (-up), gimbaled by the stick (capped 20 deg)
+    const tilt = clamp(Math.hypot(c.pitch, c.roll) * 20 * DEG, 0, 20 * DEG);
+    if (tilt > 1e-4 && this.thr > 0.01 && this.prop > 0) {
+      const east = _lE.crossVectors(this.WORLD_Y, up).normalize();
+      if (east.lengthSq() < 0.1) east.set(0, 0, 1);
+      const north = _lN.crossVectors(up, east).normalize();
+      // stick pitch -> north tilt, roll -> east tilt (simple gimbal mapping)
+      // The engine exhausts DOWNWARD, so the force on the craft is UP (+up),
+      // tilted by the gimbal. (Thrusting -up is a brake-less dive — v1 bug.)
+      const tUp = _lTUp
+        .copy(up)
+        .addScaledVector(north, -c.pitch * Math.sin(tilt))
+        .addScaledVector(east, -c.roll * Math.sin(tilt))
+        .normalize();
+      // thrust with propellant check
+      const mdot = this.BURN_RATE * this.thr;
+      const burn = Math.min(this.prop, mdot * dt);
+      const frac = mdot > 0 ? burn / (mdot * dt) : 0;
+      this.prop -= burn;
+      acc.addScaledVector(tUp, (this.thr * frac * this.THRUST_LANDER) / (this.mLand + this.prop));
+    }
+
+    this.vel.addScaledVector(acc, dt);
+    this.pos.addScaledVector(this.vel, dt);
+
+    // upright attitude: slerp the engine axis (body +Y) toward the local sky
+    const upB = _lB1.set(0, 1, 0).applyQuaternion(this.q);
+    const axis = _lB2.crossVectors(upB, up);
+    const sinA = axis.length();
+    if (sinA > 1e-6) {
+      axis.multiplyScalar(1 / sinA);
+      const ang = Math.asin(clamp(sinA, -1, 1)) * Math.min(1, dt * 1.5);
+      this._dq.setFromAxisAngle(axis, ang);
+      this.q.premultiply(this._dq).normalize();
+    }
+
+    // ground contact — re-evaluated AFTER integration so fast descents can
+    // not tunnel through the surface between steps
+    const r2 = _lR.copy(this.pos).sub(this.moonC);
+    const n2 = r2.length();
+    const up2 = _lUp.copy(r2).multiplyScalar(1 / n2);
+    const hS2 = moonHeight(up2.x, up2.y, up2.z);
+    const agl2 = n2 - R_MOON - hS2;
+    if (agl2 < 0 && !this.landed) {
+      const vs = this.vel.dot(up2);
+      this.pos.copy(up2).multiplyScalar(R_MOON + hS2).add(this.moonC);
+      this.vel.set(0, 0, 0);
+      if (vs < -2.5) {
+        this.frozen = true;
+        this.note = 'CRASHED';
+        this.apPhase = 'off';
+      } else {
+        this.landed = true;
+        this.thr = 0;
+        if (this.apPhase === 'descent') {
+          this.apPhase = 'off';
+          this.note = 'LANDED';
+        }
+      }
+      this.tAgl = 0;
+      this.tVs = 0;
+      this.tGs = 0;
+      return;
+    }
+
+    // telemetry
+    this.tAgl = Math.max(agl2, 0);
+    this.tVs = this.vel.dot(up2);
+    this.tGs = this.vel.length();
+    this.tIas = 0; // no atmosphere
+  }
+
+  /**
+   * Scripted lunar descent: hold a descent-rate schedule (120 m/s free-fall
+   * high up, 50 m/s under 6 km, 8 m/s under 300 m, 1.5 m/s under 30 m),
+   * nulling horizontal drift with gimbal tilt. Touchdown <2.5 m/s.
+   * Writes throttle + stick; scratch vectors from the _l* set only.
+   */
+  private lunarAutopilot(agl: number, up: THREE.Vector3): void {
+    const m = this.mLand + this.prop;
+    const gLocal = MU_MOON / Math.pow(this.pos.distanceTo(this.moonC), 2);
+    // target vertical speed schedule
+    const vsTgt =
+      agl > 6000 ? -Math.min(120, Math.sqrt(2 * gLocal * Math.max(agl - 3000, 0)))
+      : agl > 300 ? -50
+      : agl > 30 ? -8
+      : -1.5;
+    // thrust to close the VS gap: a = g + (vsTgt - vs)/tau
+    const vs = this.vel.dot(up);
+    const tau = agl > 300 ? 3 : 1.2;
+    const aNeed = gLocal + (vsTgt - vs) / tau;
+    const aMax = this.prop > 0 ? this.THRUST_LANDER / m : 0;
+    this.thr = clamp(aNeed / aMax, 0, 1);
+    // horizontal drift nulling via stick (proportional). Thrust direction is
+    // -up + north*(-pitch*s) + east*(-roll*s), so opposing an eastward drift
+    // needs roll > 0 and a northward drift needs pitch > 0.
+    const east = _lE.crossVectors(this.WORLD_Y, up).normalize();
+    const north = _lN.crossVectors(up, east).normalize();
+    const vh = _lVh.copy(this.vel).addScaledVector(up, -vs);
+    const driftE = vh.dot(east);
+    const driftN = vh.dot(north);
+    const c = this.rig.ctl;
+    c.roll = clamp(driftE * 0.05, -1, 1);
+    c.pitch = clamp(driftN * 0.05, -1, 1);
+  }
+
+  /** Camera write for the lander (near plane from AGL). */
+  private writeCameraLunar(): void {
+    // Landing camera: rides a few meters above the feet, looking straight
+    // down at the surface (the body attitude animates the lander, the view
+    // here is the descent camera).
+    const up = _lUp.copy(this.pos).sub(this.moonC).normalize();
+    const camAbs = _lB1.copy(this.pos).addScaledVector(up, 2.5);
+    this.world.rel(camAbs, this._tmp);
+    this.rig.camera.position.copy(this._tmp);
+    const belowAbs = _lB2.copy(this.pos).addScaledVector(up, -1000);
+    this.world.rel(belowAbs, _lTUp);
+    this.rig.camera.up.copy(this.WORLD_Y);
+    this.rig.camera.lookAt(_lTUp);
+    const near = clamp(this.tAgl * 0.25 + 0.3, 0.3, 5e4);
+    if (Math.abs(near - this.lastNear) / near > 0.3 || this.lastNear < 0) {
+      this.lastNear = near;
+      this.rig.camera.near = near;
+      this.rig.camera.updateProjectionMatrix();
+    }
   }
 
   // ------------------------------------------------------------------ physics
@@ -523,7 +743,9 @@ export class FlightModel {
   }
 
   getStatus(): FlightStatus {
-    const la = this.mode === 'fly' ? this.apPhase.toUpperCase() : 'MANUAL';
+    const la =
+      this.mode === 'lunar' ? (this.landed ? 'TOUCHDOWN' : this.apPhase.toUpperCase()) :
+      this.mode === 'fly' ? this.apPhase.toUpperCase() : 'MANUAL';
     return {
       ias: this.tIas,
       gs: this.tGs,
@@ -540,6 +762,13 @@ export class FlightModel {
     const s = this.getStatus();
     // stationary: airflow angles are degenerate (atan2 of ~0) — show dashes
     const a = s.gs > 2 ? this.airflowDebug() : null;
+    if (this.mode === 'lunar') {
+      return (
+        `LANDER GS ${s.gs.toFixed(1)}  AGL ${fmtM(s.agl)}  VS ${s.vs >= 0 ? '+' : ''}${s.vs.toFixed(1)}  ` +
+        `THR ${(s.thr * 100).toFixed(0)}%  PROP ${this.prop.toFixed(0)} kg  ` +
+        `[${s.phase}${s.note ? ' ' + s.note : ''}]`
+      );
+    }
     return (
       `FLY IAS ${s.ias.toFixed(0)} m/s  GS ${s.gs.toFixed(0)}  AGL ${fmtM(s.agl)}  VS ${s.vs >= 0 ? '+' : ''}${s.vs.toFixed(1)}  ` +
       (a
@@ -561,6 +790,18 @@ const _sLift = new THREE.Vector3();
 const _sCamUp = new THREE.Vector3();
 const _sRoll = new THREE.Vector3();
 const _sLevelQ = new THREE.Quaternion();
+// dedicated lunar lander temps — the autopilot and the physics step run in
+// the same call stack, so sharing ANY of these between the two (or with the
+// earth-flight temps) silently corrupts the other user. Never alias.
+const _lR = new THREE.Vector3();
+const _lUp = new THREE.Vector3();
+const _lAcc = new THREE.Vector3();
+const _lE = new THREE.Vector3();
+const _lN = new THREE.Vector3();
+const _lTUp = new THREE.Vector3();
+const _lVh = new THREE.Vector3();
+const _lB1 = new THREE.Vector3();
+const _lB2 = new THREE.Vector3();
 
 const smoothstep = (e0: number, e1: number, x: number): number => {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);

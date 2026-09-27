@@ -34,3 +34,25 @@ export function moonPositionAtAngle(a: number, out: THREE.Vector3): THREE.Vector
 export function moonPosition(t: number, out: THREE.Vector3): THREE.Vector3 {
   return moonPositionAtAngle(t * ANG_RATE, out);
 }
+
+const _mp = new THREE.Vector3();
+
+/**
+ * Moon center from the test params used elsewhere (?moonangle=<deg>):
+ * defaults to the live clock position. The FlightModel's lunar lander needs
+ * the same orbit position the renderer uses, resolved independently.
+ */
+export function moonCenterFromParams(q: URLSearchParams, tSimSec: number): THREE.Vector3 {
+  if (q.has('moonangle')) {
+    return moonPositionAtAngle(num2(q, 'moonangle', 0) * DEG2, _mp).clone();
+  }
+  return moonPosition(tSimSec, _mp).clone();
+}
+
+const DEG2 = Math.PI / 180;
+const num2 = (q: URLSearchParams, k: string, d: number): number => {
+  const v = q.get(k);
+  if (v === null) return d;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};

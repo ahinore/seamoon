@@ -249,10 +249,11 @@ world.abs(rig.camera.position, absCam); // autopilot placed the camera
 // (?demo=fly starts in the aircraft with the scripted takeoff->landing
 // mission). In flight mode the autopilot test driver is disabled.
 const flight = new FlightModel(rig, world);
-if (flight.mode === 'fly') {
+if (flight.mode === 'fly' || flight.mode === 'lunar') {
   rig.stickMode = true;
-  flight.reset(); // aircraft owns the camera from frame 1 in fly mode
+  flight.reset(); // aircraft owns the camera from frame 1 in flight modes
   auto.suspend();
+  world.abs(rig.camera.position, absCam);
 }
 
 /** Switch free-camera <-> aircraft (F key). */
