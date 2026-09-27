@@ -519,7 +519,7 @@ renderer.setAnimationLoop(() => {
     `dbg cam=(${rig.camera.position.x.toFixed(0)},${rig.camera.position.y.toFixed(0)},${rig.camera.position.z.toFixed(0)}) org=(${world.origin.x.toFixed(0)},${world.origin.y.toFixed(0)},${world.origin.z.toFixed(0)})`,
     `tiles ${s.visibleTiles}  tris ${(s.triangles / 1000).toFixed(1)}k  maxLvl ${s.maxVisibleLevel}`,
     `sea tiles ${sea.stats.visibleTiles}  tris ${(sea.stats.triangles / 1000).toFixed(1)}k  maxLvl ${sea.stats.maxVisibleLevel}`,
-    `queue ${s.pending}  cache ${s.cached}  built ${s.built}  evicted ${s.evicted}  hits ${s.cacheHits}`,
+    `queue ${s.pending}  cache ${s.cached}  built ${s.built} (wk ${s.workerBuilt})  evicted ${s.evicted}  hits ${s.cacheHits}`,
     `drawcalls ${renderer.info.render.calls}`,
     rig.mouseLocked ? 'mouse locked' : 'click = mouse look (arrows also work)',
   ]);
