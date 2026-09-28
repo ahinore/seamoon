@@ -24,6 +24,9 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uBetaM: { value: new THREE.Vector3(4e-6, 4e-6, 4e-6) },
       uHR: { value: 8500 },
       uHM: { value: 1200 },
+      // M10.3: 1 = apply ACES tone mapping in-shader (custom ShaderMaterials
+      // never run three's tonemap chunk); 0 = pass-through (?tonemap=0).
+      uToneMap: { value: 1 },
     },
     vertexShader: /* glsl */ `
       #include <common>
@@ -57,11 +60,19 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uniform vec3 uBetaM;
       uniform float uHR;
       uniform float uHM;
+      uniform float uToneMap;
       varying vec3 vN;
       varying vec3 vC;
       varying vec3 vGrid;
       varying vec3 vCol;
       varying vec3 vWorld;
+
+      // ACES filmic (Narkowicz approximation) — the same curve three's
+      // ACESFilmicToneMapping applies to built-in materials, inlined because
+      // custom ShaderMaterials skip the tonemap chunk.
+      vec3 acesToneMap(vec3 x) {
+        return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+      }
       void main() {
         // wrapped Lambert: soft terminator instead of a hard day/night cut
         float ndl = clamp((dot(normalize(vN), uSunDir) + 0.18) / 1.18, 0.0, 1.0);
@@ -126,6 +137,8 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
           float line = max(boundary, grid * fade) * (1.0 - vGrid.z);
           col = mix(col, vec3(0.95), line * 0.85);
         }
+        // M10.3: HDR rolloff before sRGB conversion (uToneMap note above).
+        col = mix(col, acesToneMap(col), uToneMap);
         gl_FragColor = vec4(col, 1.0);
         #include <colorspace_fragment>
       }
@@ -173,6 +186,8 @@ export function makeSeaMaterial(shared: {
       uWire: { value: 0 },
       uFovTan: { value: Math.tan(THREE.MathUtils.degToRad(60) * 0.5) },
       uViewportH: { value: 1000 },
+      // M10.3: in-shader ACES toggle (custom shaders skip three's tonemap).
+      uToneMap: { value: 1 },
     },
     vertexShader: /* glsl */ `
       #include <common>
@@ -212,11 +227,17 @@ export function makeSeaMaterial(shared: {
       uniform float uHM;
       uniform float uTime;
       uniform float uWire;
+      uniform float uToneMap;
       varying vec3 vN;
       varying vec3 vWorld;
       varying vec3 vAbsPos;
       varying float vDepth;
       varying float vPxPerM;
+
+      // ACES filmic (Narkowicz) — matches the terrain shader (M10.3).
+      vec3 acesToneMap(vec3 x) {
+        return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+      }
 
       // analytic Gerstner-ish wave normal: 3 octaves, phase from absolute pos
       vec3 waveNormal(vec3 n, vec3 t, vec3 b, vec3 absP, float amp) {
@@ -325,6 +346,8 @@ export function makeSeaMaterial(shared: {
           float fog = clamp(1.0 - exp(-min(dR * uBetaR.x + dM * uBetaM.x, 12.0)), 0.0, 1.0);
           col = mix(col, inscatter * 1.15, min(fog, 0.85));
         }
+        // M10.3: HDR rolloff (glint hotspot) before sRGB conversion.
+        col = mix(col, acesToneMap(col), uToneMap);
         gl_FragColor = vec4(col, 1.0);
         #include <colorspace_fragment>
       }

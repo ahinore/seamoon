@@ -45,6 +45,17 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
+// M10.3: HDR tone mapping. Terrain/sea shaders output HDR values (sun glint
+// 1-exp(-d*fres*0.12) caps at 1, but inscatter * 1.15 and vertex colors on
+// the sunlit limb exceed 1.0); without tone mapping those clip to flat white.
+// ACES gives filmic rolloff for the glint hotspot and the atmosphere's
+// horizon band. ?tonemap=0 keeps the old pass-through for A/B.
+// NOTE: our custom ShaderMaterials call <colorspace_fragment> themselves, so
+// three's output tonemap chunk never runs for them — we apply the same ACES
+// curve inline in each shader (uToneMap flag) instead. Built-in materials
+// (Lambert for vegetation) DO get renderer.toneMapping automatically.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
 document.body.appendChild(renderer.domElement);
 
 // WORKAROUND for a three.js 0.170 bug (WebGLState.setReversed):
@@ -128,6 +139,13 @@ const sea = new PlanetView(scene, R, seaMaterial, {
 });
 if (urlParams.get('sea') === '0') {
   sea.root.visible = false;
+}
+// M10.3: ?tonemap=0 disables the in-shader ACES curve (A/B diagnosis).
+const tonemapOn = urlParams.get('tonemap') !== '0';
+if (!tonemapOn) {
+  material.uniforms.uToneMap.value = 0;
+  seaMaterial.uniforms.uToneMap.value = 0;
+  renderer.toneMapping = THREE.NoToneMapping;
 }
 const stars = makeStars(6000, 6e8);
 scene.add(stars);
