@@ -4,6 +4,7 @@ import { buildTileGeometry, cubeToSphereDir, EARTH_BODY, type BodySurface } from
 import { MOON_BODY } from './moonBody';
 import { buildSeaGeometry } from './seaGeometry';
 import { TilePool } from './tilePool';
+import { buildTileScatter, makeTreeGeometry, makeRockGeometry } from './scatter';
 
 export interface PlanetOptions {
   /** Max quadtree depth. 17+ reaches ~1 m vertex spacing on Earth radius. */
@@ -72,6 +73,8 @@ interface QNode {
   children: QNode[] | null;
   tile: TileMesh | null;
   dead: boolean;
+  /** M10.2: scatter already attached (one-shot guard per tile instance). */
+  vegDone: boolean;
 }
 
 const keyOf = (n: QNode) => `${n.face}/${n.level}/${n.ix}/${n.iy}`;
@@ -127,6 +130,14 @@ export class PlanetView {
   private readonly lookAheadM = 3000;
   private prevCam = new THREE.Vector3();
   private havePrevCam = false;
+  // ---- M10.2: near-scene vegetation & rocks ----
+  /** ?veg=0 disables scattering (A/B diagnosis). */
+  private readonly vegOn: boolean;
+  private readonly treeGeo = makeTreeGeometry();
+  private readonly rockGeo = makeRockGeometry();
+  private readonly vegMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+  /** Number of tiles currently carrying scatter meshes (HUD). */
+  vegTiles = 0;
 
   constructor(scene: THREE.Scene, radius: number, material: THREE.Material, opts: PlanetOptions = {}, body: BodySurface = EARTH_BODY) {
     this.radius = radius;
@@ -141,6 +152,12 @@ export class PlanetView {
       ? new URLSearchParams(location.search).get('noworker') === '1'
       : true; // unknown BodySurface: functions are not in the worker bundle
     this.bodyKey = body === MOON_BODY ? 'moon' : 'earth';
+    // Vegetation only makes sense on Earth (moon is airless regolith) and
+    // only on the TERRAIN view (never the sea shell).
+    this.vegOn =
+      !this.o.seaMode &&
+      this.bodyKey === 'earth' &&
+      new URLSearchParams(location.search).get('veg') !== '0';
 
     // Roots are built synchronously so the planet exists from frame 1.
     for (let f = 0; f < 6; f++) {
@@ -207,6 +224,7 @@ export class PlanetView {
       children: null,
       tile: null,
       dead: false,
+      vegDone: false,
     };
   }
 
@@ -313,8 +331,50 @@ export class PlanetView {
     for (const c of node.children!) this.visit(c);
   }
 
+  /**
+   * M10.2: build + attach this tile's vegetation/rock InstancedMeshes.
+   * The scatter lives in tile-local space, so it inherits the tile's world
+   * transform (position = absolute center − origin). Deterministic: same
+   * tile key always yields the same forest.
+   */
+  private attachScatter(node: QNode, t: TileMesh): void {
+    // Tangent basis at the tile center: U/V span the local uv plane.
+    const nrm = new THREE.Vector3(node.nx, node.ny, node.nz);
+    // Pick the least-parallel world axis for a stable tangent.
+    const ref = Math.abs(nrm.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    const U = new THREE.Vector3().crossVectors(ref, nrm).normalize();
+    const V = new THREE.Vector3().crossVectors(nrm, U).normalize();
+
+    const { trees, rocks } = buildTileScatter(
+      node.face, node.level, node.ix, node.iy,
+      node.center, U, V, node.edgeLen,
+    );
+    let added = 0;
+    const place = (matrices: THREE.Matrix4[], geo: THREE.BufferGeometry) => {
+      if (matrices.length === 0) return;
+      const im = new THREE.InstancedMesh(geo, this.vegMaterial, matrices.length);
+      for (let i = 0; i < matrices.length; i++) im.setMatrixAt(i, matrices[i]);
+      im.instanceMatrix.needsUpdate = true;
+      im.frustumCulled = false; // culling is the tile quadtree's job
+      im.renderOrder = 2;
+      t.mesh.add(im);
+      added++;
+    };
+    place(trees, this.treeGeo);
+    place(rocks, this.rockGeo);
+    if (added > 0) this.vegTiles++;
+  }
+
   private show(node: QNode): void {
     const t = node.tile!;
+    // M10.2: attach near-scene scatter when this tile first becomes visible
+    // at vegetation depth. Attached ONCE per tile (node.vegDone guard); the
+    // InstancedMeshes live as children of the tile mesh so repositioning and
+    // visibility follow the tile for free.
+    if (this.vegOn && !node.vegDone && node.level >= 8) {
+      node.vegDone = true;
+      this.attachScatter(node, t);
+    }
     // Place the mesh in frame-relative space: double subtraction here is the
     // camera/origin-relative handoff to float32 (the only quantization step).
     // Body center (moon orbit position) is included in the absolute->rel map.
