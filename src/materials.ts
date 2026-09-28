@@ -27,6 +27,8 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       // M10.3: 1 = apply ACES tone mapping in-shader (custom ShaderMaterials
       // never run three's tonemap chunk); 0 = pass-through (?tonemap=0).
       uToneMap: { value: 1 },
+      // M10.4: 1 = per-pixel procedural detail splatting (?detail=0 A/B).
+      uDetail: { value: 1 },
     },
     vertexShader: /* glsl */ `
       #include <common>
@@ -61,6 +63,7 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uniform float uHR;
       uniform float uHM;
       uniform float uToneMap;
+      uniform float uDetail;
       varying vec3 vN;
       varying vec3 vC;
       varying vec3 vGrid;
@@ -73,11 +76,57 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       vec3 acesToneMap(vec3 x) {
         return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
       }
+
+      // M10.4: cheap hash-based value noise for per-pixel detail splatting.
+      // The vertex colors change every ~1-70 m (res grid), so between
+      // vertices the ground is a smooth gradient — flat plastic look up
+      // close. Two octaves of world-space noise restore texture at sub-meter
+      // scale without any texture fetch (terrain is procedural; splatting a
+      // bitmap would break the deterministic-noise rule anyway).
+      float hash13(vec3 p) {
+        p = fract(p * 0.1031);
+        p += dot(p, p.zyx + 31.32);
+        return fract((p.x + p.y) * p.z);
+      }
+      float vnoise(vec3 p) {
+        vec3 i = floor(p);
+        vec3 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f); // smoothstep fade
+        float n000 = hash13(i + vec3(0.0, 0.0, 0.0));
+        float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+        float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+        float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+        float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+        float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+        float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+        float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+        return mix(
+          mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+          mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+          f.z);
+      }
+
       void main() {
         // wrapped Lambert: soft terminator instead of a hard day/night cut
         float ndl = clamp((dot(normalize(vN), uSunDir) + 0.18) / 1.18, 0.0, 1.0);
         // per-vertex terrain color (sRGB-ish values authored in linear space)
         vec3 col = vCol * (0.10 + 0.90 * ndl);
+
+        // M10.4: per-pixel detail splatting. World-space noise (absolute pos
+        // via vWorld + uOrigin) so the pattern is continuous across tile
+        // boundaries, LOD transitions and floating-origin rebases. Oct1 ~3 m
+        // patches (albedo mottling), oct2 ~0.5 m speckle. Weighted by view
+        // distance so far tiles don't shimmer (noise < 1px aliases).
+        if (uDetail > 0.5) {
+          vec3 absP = vWorld + uOrigin;
+          float dist = distance(uCamPos, vWorld);
+          float w = clamp(1.0 - (dist - 1500.0) / 4500.0, 0.0, 1.0);
+          if (w > 0.001) {
+            float d1 = vnoise(absP * 0.33) - 0.5;         // ~3 m mottling
+            float d2 = vnoise(absP * 2.1) - 0.5;          // ~0.5 m speckle
+            col *= 1.0 + w * (d1 * 0.22 + d2 * 0.10);
+          }
+        }
 
         // Aerial perspective: cheap single-scatter fog toward the atmosphere
         // color. Optical depth from the exponential density over the view

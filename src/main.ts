@@ -147,6 +147,10 @@ if (!tonemapOn) {
   seaMaterial.uniforms.uToneMap.value = 0;
   renderer.toneMapping = THREE.NoToneMapping;
 }
+// M10.4: ?detail=0 disables per-pixel procedural detail splatting (A/B).
+if (urlParams.get('detail') === '0') {
+  material.uniforms.uDetail.value = 0;
+}
 const stars = makeStars(6000, 6e8);
 scene.add(stars);
 // Sun disc (M9.4): placed along sunDir at a fixed camera distance each frame
