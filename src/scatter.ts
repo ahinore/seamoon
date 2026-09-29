@@ -32,6 +32,8 @@ export interface ScatterOptions {
   minLevel?: number;
   /** Placement cell size in meters. */
   cellM?: number;
+  /** Tile vertex-grid resolution (must match the host tile's build res). */
+  res?: number;
 }
 
 const _up = new THREE.Vector3(0, 1, 0);
@@ -66,6 +68,15 @@ export function buildTileScatter(
   // trees to ~9-26 m and rocks to ~1-6 m as the design note intends.
   const TREE_M = 10;
   const ROCK_M = 6;
+  // M10.5 fix: sample ground height with the SAME LOD spacing the host tile's
+  // mesh uses (tileGeometry: spacing = edge / (res-1), res=65 default). The
+  // height field fades its fine octaves per-spacing, so a deep tile's surface
+  // carries detail a fixed 55 m sampling cannot see — scatter grounded at the
+  // wrong spacing sits tens of meters above/below the visible mesh and
+  // "vanishes" when viewed at grazing angles (trees were buried, nadir views
+  // still showed the canopy through the terrain).
+  const res = opts.res ?? 65;
+  const spacing = Math.max(edgeM / (res - 1), 0);
   const R = center.length();
   const trees: THREE.Matrix4[] = [];
   const rocks: THREE.Matrix4[] = [];
@@ -105,7 +116,7 @@ export function buildTileScatter(
         .addScaledVector(tangentV, offV)
         .normalize();
 
-      const h = terrainHeight(_n.x, _n.y, _n.z, cellM);
+      const h = terrainHeight(_n.x, _n.y, _n.z, spacing);
       if (h <= 0) continue; // ocean / lake bottoms
 
       // Slope estimate: finite differences along the tangent basis, on the
@@ -113,18 +124,22 @@ export function buildTileScatter(
       const eps = cellM / center.length();
       _pU.copy(_n).addScaledVector(tangentU, eps).normalize();
       _pV.copy(_n).addScaledVector(tangentV, eps).normalize();
-      const hU = terrainHeight(_pU.x, _pU.y, _pU.z, cellM);
-      const hV = terrainHeight(_pV.x, _pV.y, _pV.z, cellM);
+      const hU = terrainHeight(_pU.x, _pU.y, _pU.z, spacing);
+      const hV = terrainHeight(_pV.x, _pV.y, _pV.z, spacing);
       const slope = Math.min((Math.abs(hU - h) + Math.abs(hV - h)) / (2 * cellM), 1);
 
       // Biome gate — the same math terrainColor uses, so scatter and ground
       // shading can never disagree about where the forest is.
+      // M10.5 retune: matches terrain.ts's corrected snowline (the old
+      // power-0.62 curve put the snowline at ~500 m by lat 38, which barred
+      // trees from the very tiles the camera flies over).
       const m = fbm3(_n.x * 8, _n.y * 8, _n.z * 8, SEED + 555, 2);
       const latRad = Math.asin(Math.min(Math.max(_n.y, -1), 1));
       const temp =
-        Math.pow(Math.abs(latRad) / (Math.PI / 2), 0.62) * 1.3 +
-        h / 6000 * 0.55 - m * 0.06;
-      const snowH = 2900 - temp * 3000;
+        Math.pow(Math.abs(latRad) / (Math.PI / 2), 1.35) * (3400 / 3000) +
+        h / 6000 * 0.55 -
+        m * 0.06;
+      const snowH = 3400 - temp * 3000;
       if (h > snowH) continue;   // snow: nothing grows
       if (h < 12) continue;      // beach
       if (h > snowH * 0.72 || slope > 0.55) {
@@ -180,7 +195,7 @@ export function makeTreeGeometry(): THREE.BufferGeometry {
       arr[v * 3 + 1] = colors[i][1];
       arr[v * 3 + 2] = colors[i][2];
     }
-    g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+    g.setAttribute('aCol', new THREE.BufferAttribute(arr, 3));
     return g;
   });
   // Simple merge (three r170 has no BufferGeometryUtils import in this
@@ -196,13 +211,13 @@ export function makeTreeGeometry(): THREE.BufferGeometry {
   for (const g of nonIdx) {
     pos.set(g.getAttribute('position').array as Float32Array, o);
     nrm.set(g.getAttribute('normal').array as Float32Array, o);
-    col.set(g.getAttribute('color').array as Float32Array, o);
+    col.set(g.getAttribute('aCol').array as Float32Array, o);
     o += g.getAttribute('position').count * 3;
   }
   const out = new THREE.BufferGeometry();
   out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   out.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
-  out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  out.setAttribute('aCol', new THREE.BufferAttribute(col, 3));
   for (const g of [...nonIdx, ...geoms]) g.dispose();
   return out;
 }
@@ -228,7 +243,7 @@ export function makeRockGeometry(): THREE.BufferGeometry {
     col[v * 3 + 1] = shade;
     col[v * 3 + 2] = shade * 0.92;
   }
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('aCol', new THREE.BufferAttribute(col, 3));
   g.computeVertexNormals();
   return g;
 }

@@ -5,6 +5,7 @@ import { MOON_BODY } from './moonBody';
 import { buildSeaGeometry } from './seaGeometry';
 import { TilePool } from './tilePool';
 import { buildTileScatter, makeTreeGeometry, makeRockGeometry } from './scatter';
+import { makeVegMaterial } from './vegMaterial';
 
 export interface PlanetOptions {
   /** Max quadtree depth. 17+ reaches ~1 m vertex spacing on Earth radius. */
@@ -73,8 +74,6 @@ interface QNode {
   children: QNode[] | null;
   tile: TileMesh | null;
   dead: boolean;
-  /** M10.2: scatter already attached (one-shot guard per tile instance). */
-  vegDone: boolean;
 }
 
 const keyOf = (n: QNode) => `${n.face}/${n.level}/${n.ix}/${n.iy}`;
@@ -135,9 +134,15 @@ export class PlanetView {
   private readonly vegOn: boolean;
   private readonly treeGeo = makeTreeGeometry();
   private readonly rockGeo = makeRockGeometry();
-  private readonly vegMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+  // M10.5: light-free custom shader (the scene has zero THREE lights —
+  // MeshLambertMaterial rendered every tree near-black). Takes the shared
+  // uSunDir uniform object so trees agree with the ground lighting.
+  // main.ts re-points uSunDir at the atmosphere's shared uniform object.
+  readonly vegMaterial: ReturnType<typeof makeVegMaterial>;
   /** Number of tiles currently carrying scatter meshes (HUD). */
   vegTiles = 0;
+  /** Shared sun-direction uniform the material must track (set by main). */
+  readonly vegSunDir = { value: new THREE.Vector3(1, 0.3, 0.35).normalize() };
 
   constructor(scene: THREE.Scene, radius: number, material: THREE.Material, opts: PlanetOptions = {}, body: BodySurface = EARTH_BODY) {
     this.radius = radius;
@@ -148,6 +153,7 @@ export class PlanetView {
       seaMode: false,
       ...opts,
     } as Required<Omit<PlanetOptions, 'seaMode'>> & { seaMode: boolean };
+    this.vegMaterial = makeVegMaterial(this.vegSunDir);
     this.syncTiles = body === EARTH_BODY || body === MOON_BODY
       ? new URLSearchParams(location.search).get('noworker') === '1'
       : true; // unknown BodySurface: functions are not in the worker bundle
@@ -224,7 +230,6 @@ export class PlanetView {
       children: null,
       tile: null,
       dead: false,
-      vegDone: false,
     };
   }
 
@@ -348,6 +353,7 @@ export class PlanetView {
     const { trees, rocks } = buildTileScatter(
       node.face, node.level, node.ix, node.iy,
       node.center, U, V, node.edgeLen,
+      { res: this.o.res },
     );
     let added = 0;
     const place = (matrices: THREE.Matrix4[], geo: THREE.BufferGeometry) => {
@@ -367,12 +373,19 @@ export class PlanetView {
 
   private show(node: QNode): void {
     const t = node.tile!;
-    // M10.2: attach near-scene scatter when this tile first becomes visible
-    // at vegetation depth. Attached ONCE per tile (node.vegDone guard); the
-    // InstancedMeshes live as children of the tile mesh so repositioning and
-    // visibility follow the tile for free.
-    if (this.vegOn && !node.vegDone && node.level >= 8) {
-      node.vegDone = true;
+    // M10.2/M10.5: attach near-scene scatter when this tile first becomes
+    // visible at vegetation depth. Attached ONCE per tile instance (node
+    // .vegDone guard); the InstancedMeshes live as children of the tile mesh
+    // so repositioning and visibility follow the tile for free.
+    // M10.5 fix: the guard previously fired only on the FIRST visible tile at
+    // level>=8 along a branch — when the camera closed in and the quadtree
+    // split deeper, the parent (carrying every tree) went hidden while the
+    // fresh children had none, so nearby forests vanished. Attaching at EVERY
+    // level>=8 show (children included) keeps trees present at all LOD depths;
+    // buildTileScatter is deterministic per (face,level,ix,iy) so the forest
+    // re-generates consistently for each deeper tile.
+    if (this.vegOn && !t.vegDone && node.level >= 8) {
+      t.vegDone = true;
       this.attachScatter(node, t);
     }
     // Place the mesh in frame-relative space: double subtraction here is the

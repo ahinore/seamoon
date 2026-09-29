@@ -23,6 +23,9 @@ export class TileMesh {
   readonly mesh: THREE.Mesh;
   readonly center: THREE.Vector3;
   readonly triangles: number;
+  /** M10.5: scatter attached guard — lives on the TILE so a cached/reused
+   * tile never gets a second forest when a fresh QNode binds to it. */
+  vegDone = false;
 
   constructor(
     face: number,

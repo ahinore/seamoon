@@ -188,6 +188,10 @@ const clouds = makeCloudMesh(R, cloudUniforms);
 scene.add(clouds);
 if (urlParams.get('clouds') === '0') clouds.visible = false;
 
+// M10.5: vegetation lighting shares the same sun-direction object as the
+// terrain/atmosphere — trees and ground can never disagree on the light.
+planet.vegMaterial.uniforms.uSunDir = atmoUniforms.uSunDir;
+
 // ---- Phase 9: the moon -------------------------------------------------
 // Reuses the ENTIRE cube-sphere LOD pipeline via the BodySurface interface:
 // same quadtree, same tile builder, same material pattern — a different
