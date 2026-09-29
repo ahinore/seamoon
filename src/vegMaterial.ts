@@ -32,17 +32,33 @@ export function makeVegMaterial(sunDir: { value: THREE.Vector3 }): THREE.ShaderM
       varying vec3 vN;
       varying vec3 vCol;
       varying vec3 vWorld;
+      varying float vShrink;
       void main() {
-        // InstancedMesh: three only #defines USE_INSTANCING and declares the
-        // instanceMatrix attribute — a custom ShaderMaterial must APPLY it
-        // itself (built-in materials do it inside <project_vertex>). Without
-        // this every instance collapses onto the tile origin and the whole
-        // forest becomes a single invisible point.
         vec3 pos = position;
         vec3 nrm = normal;
         #ifdef USE_INSTANCING
-          pos = (instanceMatrix * vec4(pos, 1.0)).xyz;
-          nrm = mat3(instanceMatrix) * nrm;
+        // M10.6: distance-based tree shrink. Scatter is per-tile with a fixed
+        // 55 m lattice, so on far tiles the trees sub-pixel-pop and shimmer.
+        // Scaling the instance toward its ground point as it recedes removes
+        // the pop without alpha (no sorting/depth issues). Full size under
+        // 12 km, gone by 28 km — beyond the level>=8 scatter attach range.
+        //
+        // The distance is measured to the INSTANCE's own ground point in
+        // WORLD space (modelMatrix * instanceMatrix translation column), NOT
+        // to the tile center: the world position of a tree's base never moves
+        // — rebases shift every frame-space position by the same amount, so
+        // the world-space distance (and hence the shrink factor) is INVARIANT
+        // under rebase and LOD transitions. Measuring from the tile center
+        // made the shrink jump whenever a tile was repositioned, which read
+        // as trees visibly sliding while they "grew" near the camera.
+          vec3 iTrans = instanceMatrix[3].xyz;
+          mat3 iLinear = mat3(instanceMatrix);
+          vec3 baseWorld = (modelMatrix * vec4(iTrans, 1.0)).xyz;
+          vShrink = 1.0 - smoothstep(12000.0, 28000.0, distance(cameraPosition, baseWorld));
+          pos = iTrans + iLinear * pos * vShrink;
+          nrm = iLinear * nrm;
+        #else
+          vShrink = 1.0;
         #endif
         vN = normalize(mat3(modelMatrix) * nrm);
         vCol = aCol;
@@ -58,6 +74,7 @@ export function makeVegMaterial(sunDir: { value: THREE.Vector3 }): THREE.ShaderM
       varying vec3 vN;
       varying vec3 vCol;
       varying vec3 vWorld;
+      varying float vShrink;
 
       // ACES filmic (Narkowicz) — matches terrain/sea shaders (M10.3).
       vec3 acesToneMap(vec3 x) {
@@ -65,6 +82,10 @@ export function makeVegMaterial(sunDir: { value: THREE.Vector3 }): THREE.ShaderM
       }
 
       void main() {
+        // M10.6: fully shrunk trees are still rasterized as sub-pixel dots at
+        // glancing angles — fade them out completely past the shrink range so
+        // they never shimmer. (vShrink==0 => discard.)
+        if (vShrink <= 0.001) discard;
         vec3 N = normalize(vN);
         // wrapped Lambert, same soft-terminator constants as the terrain
         float ndl = clamp((dot(N, uSunDir) + 0.18) / 1.18, 0.0, 1.0);

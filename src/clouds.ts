@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 
 /**
- * Cloud layer (Phase 8, volumetric-only).
+ * Cloud layer (Phase 8, M10.6: two-LOD hybrid).
  *
- * FAR-VIEW 2D SHELL IS DISABLED (user request): the old flat shell read
- * as fake continents from orbit and made the system confusing. Above
- * ~90 km camera altitude the mesh discards every fragment — space views
- * show NO clouds (terrain/ocean only).
+ * FAR (camAlt > ~60 km): flat 2D texture shell. The shell shader samples the
+ * SAME density field the volumetric march uses (cloudDensity's billow fbm +
+ * weather gate), evaluated at the mid-slab altitude along the fragment's
+ * radial direction — so the texture IS the cloud map the near view renders,
+ * and puffs sit at identical world positions in both LODs.
  *
  * NEAR (camAlt < ~60 km): raymarched VOLUMETRIC clouds inside the slab
  * [CLOUD_BOTTOM, CLOUD_TOP]. The density field is "metaball-like":
@@ -16,6 +17,10 @@ import * as THREE from 'three';
  * short march toward the sun (Beer-Lambert shadowing + phase + powder
  * term) and the eye ray accumulates front-to-back with early exit —
  * real thickness, self-shadowing, silver linings.
+ *
+ * The LOD handoff is cross-faded: the shell's coverage fades IN from
+ * 60-120 km while the volumetric term fades OUT, so the switch is
+ * invisible from either side.
  */
 export const CLOUD_BOTTOM = 1800; // m above sea level
 export const CLOUD_TOP = 4200; // m above sea level (slab thickness)
@@ -161,10 +166,11 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         float hLayer = clamp((length(vWorld - pc) - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
                              ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)}, 0.0, 1.0);
 
-        // FAR-VIEW SHELL DISABLED (user request): clouds are volumetric-only.
-        // Above the fade band this mesh discards — no clouds from orbit.
+        // M10.7: the far-view TEXTURE SHELL owns the far field, so nothing is
+        // discarded here any more. wVol still cross-fades the volumetric
+        // march out (30-90 km) while the shell fades in (45-110 km); both
+        // evaluate the same density field (see shell branch below).
         float wVol = (1.0 - smoothstep(30000.0, 90000.0, camAlt)) * step(0.001, uVolSteps);
-        if (wVol <= 0.001) discard;
 
         // ---------------- weather / coverage ----------------
         vec3 upF = normalize(vWorld - pc);
@@ -176,6 +182,38 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         float cover = clamp(uCover * bands * 1.6 * weather + (weather - 0.5) * 0.4, 0.0, 1.0);
         cover = pow(cover, 0.7); // bias toward more visible coverage
         float t2 = uTime * 0.006;
+
+        // ============ M10.7 hybrid: shell + volumetric ==================
+        // Complementary handoff: wShell = 1 - wVol (above the near gate), so
+        // at EVERY altitude one of the two LODs is at full weight and total
+        // cloud coverage never dips (the gap the user saw at 48-60 km).
+        // Both evaluate the SAME density field at the slab middle, so the
+        // handoff just swaps WHO draws the same clouds.
+        float wShell = (1.0 - wVol) * smoothstep(8000.0, 25000.0, camAlt);
+        vec3 shellCol = vec3(0.0);
+        float shellA = 0.0;
+        if (wShell > 0.0001) {
+          vec3 shellP = upF * (uPlanetR + ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)});
+          float detail = 1.0; // far view: full detail is fine (no marching)
+          float d = cloudDensity(shellP, cover, weather, t2, 0.18, detail);
+          float hf = fbm3o(shellP * (1.0 / 640.0) + vec3(-t2 * 1.7, t2, t2 * 0.8), detail * detail);
+          d -= (1.0 - d) * hf * 0.35;
+          d = clamp(d * 1.5, 0.0, 1.0);
+          float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
+          // Density-driven color: thick cores read warm-white, thin edges
+          // cool gray-blue — matches how the volumetric deck shades, and
+          // keeps the shell from reading as one flat cream sheet.
+          shellCol = mix(vec3(0.72, 0.76, 0.82), vec3(1.02, 1.0, 0.97), smoothstep(0.05, 0.6, d)) * shellShade;
+          // Opacity calibrated to the volumetric march it replaces: marching
+          // the full ~2.4 km slab accumulates ~1-exp(-d * 6). The old k=2600
+          // saturated EVERY pixel to opaque (uniform cream sheet from orbit).
+          shellA = 1.0 - exp(-d * 6.0);
+          shellA *= wShell;
+          // night fade (same terms as the volumetric path)
+          float sunHs = dot(up0, uSunDir);
+          shellCol *= smoothstep(-0.12, 0.08, sunHs);
+          shellA *= smoothstep(-0.25, 0.0, sunHs) * 0.98 + 0.02;
+        }
 
         // ============ volumetric march (near view) ====================
         vec3 volCol = vec3(0.0);
@@ -272,20 +310,24 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
           }
         }
 
-        // ---------------- composite ----------------
-        vec3 col = volCol;
-        float alpha = 1.0 - volT;
+        // ---------------- composite (shell + volumetric) ----------------
+        // Complementary weights (wShell = 1 - wVol above 25 km): coverage
+        // alpha = aV*wVol + aS_shell*wShell sums to full coverage at every
+        // altitude; color is the opacity-weighted mean of the two layers'
+        // lit colors, so puffs stay bright-white through the handoff.
+        float aV = 1.0 - volT;            // march coverage (already wVol-scaled below)
+        float aS = shellA;                // shell coverage (wShell-scaled in shellA)
+        float cov = clamp(aV * wVol + aS * (1.0 - wVol), 0.0, 1.0);
+        vec3 col = cov > 0.0001
+          ? (volCol * wVol + shellCol * (1.0 - wVol)) / max(wVol + (1.0 - wVol), 0.0001)
+          : vec3(0.0);
+        float alpha = cov;
         // altitude-based opacity fade inside the band (flying through)
         float inBand = smoothstep(0.0, 0.25, hLayer) * (1.0 - smoothstep(0.75, 1.0, hLayer));
         float farFade = clamp(abs(camAlt - ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)}) / 6000.0, 0.0, 1.0);
         float bandFade = mix(0.35, 0.95, farFade * inBand + farFade * (1.0 - inBand));
         alpha *= mix(bandFade, 1.0, step(8000.0, camAlt));
-        // Distance fade: taper the deck out CONTINUOUSLY across the same
-        // 30-90 km band the discard gate uses. wVol used to gate only the
-        // discard, so the march ran at full strength right up to the cut and
-        // the deck popped off in one frame at ~89 km ("the ground vanished").
-        col *= wVol;
-        alpha *= wVol;
+        alpha = clamp(alpha, 0.0, 1.0);
         // night fade
         float sunH = dot(up0, uSunDir);
         col *= smoothstep(-0.12, 0.08, sunH);

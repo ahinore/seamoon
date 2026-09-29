@@ -44,6 +44,11 @@ const _n = new THREE.Vector3();
 const _pU = new THREE.Vector3();
 const _pV = new THREE.Vector3();
 
+/** Per-cell jitter rolls — two independent hashes so position and kind/scale
+ * stay independent. `slot` splits the streams (x-jitter vs v-jitter). */
+const r0a = (x: number, y: number, k: number) => hash3i(x, y, k * 17 + 9001, SEED + 9001);
+const r0b = (x: number, y: number, k: number) => hash3i(x, y, k * 17 + 9002, SEED + 9002);
+
 /**
  * Deterministic scatter for one tile, in TILE-LOCAL space
  * (+u = tangentU, +v = tangentV, +y = local up = surface normal).
@@ -94,20 +99,66 @@ export function buildTileScatter(
     _q.setFromUnitVectors(_up, _n);
   };
 
-  // Lattice cells covering the tile rectangle (cap for pathological tiles).
-  const cells = Math.min(Math.max(Math.round(edgeM / cellM), 1), 64);
+  // M10.6: WORLD-ANCHORED scatter lattice for deep tiles. The old lattice was
+  // per-tile (cells spread across the tile rect, hash keyed on level/ix/iy),
+  // so every LOD split regenerated a DIFFERENT forest — trees visibly swapped
+  // position while a deeper tile "grew in" under the camera. Deep tiles
+  // (edge/cellM <= 64) instead iterate the GLOBAL lattice cells overlapping
+  // the tile: cell index k satisfies k*cellM in [fu0, fu0+edgeM] where
+  // fu0 = tile uv-origin in face-meters. The tan mapping stretches arc length
+  // by mPerU(u) = R*(pi/4)*sec^2(u*pi/4); fu0 computed AT THE TILE'S OWN EDGE
+  // uv is EXACTLY level-invariant (u_edge * mPerU(u_edge) = R*(pi/4)*tan(u*pi/4),
+  // a pure function of world position), so the same tree lands on the same
+  // global cell at every level. Jitter/kind roll hash from the global cell
+  // index (per-face stream) only. Shallow tiles (>64 cells) keep the old
+  // per-tile lattice: they exist only far away, where individual placement is
+  // invisible and the material's distance shrink hides them anyway.
+  const edgeUv = 2 / (1 << level);
+  const uEdge = -1 + ix * edgeUv;
+  const vEdge = -1 + iy * edgeUv;
+  // Face-meters of the tile origin: u * R*(pi/4)*sec^2(u*pi/4) — the exact
+  // antiderivative of arc length under the tan mapping, evaluated at the
+  // tile's own edge uv (level-invariant for the same world spot).
+  const faceM = (u: number) => u * R * (Math.PI / 4) / Math.pow(Math.cos(u * Math.PI / 4), 2);
+  const fu0 = faceM(uEdge);
+  const fv0 = faceM(vEdge);
+  // Face-meters of the tile FAR edge (same exact evaluation) gives the span.
+  const spanU = faceM(uEdge + edgeUv) - fu0;
+  const spanV = faceM(vEdge + edgeUv) - fv0;
+  const global = Math.max(spanU, spanV) / cellM <= 64;
+  // Iterate global cells [k0, k1) covering the tile on each axis.
+  const gu0 = Math.ceil(fu0 / cellM);
+  const gu1 = Math.floor((fu0 + spanU) / cellM);
+  const gv0 = Math.ceil(fv0 / cellM);
+  const gv1 = Math.floor((fv0 + spanV) / cellM);
+  const cellsU = global ? Math.min(gu1 - gu0 + 1, 64) : Math.min(Math.max(Math.round(edgeM / cellM), 1), 64);
+  const cellsV = global ? Math.min(gv1 - gv0 + 1, 64) : cellsU;
+  const cells = cellsU;
 
-  for (let cy = 0; cy < cells; cy++) {
-    for (let cx = 0; cx < cells; cx++) {
-      // Deterministic per-cell hashes (jitter x/z, kind/scale y).
-      const cz = ((face * 63 + level) * 104729 + iy * 1013 + ix * 7) | 0;
-      const r0 = hash3i(cx, cy, cz, SEED + 9001); // jitter x
-      const r1 = hash3i(cx, cy, cz, SEED + 9002); // jitter v / scale
-      const r2 = hash3i(cx, cy, cz, SEED + 9003); // kind roll
-      const jx = (cx + 0.15 + 0.7 * r0) / cells - 0.5; // [-0.5, 0.5] w/ margin
-      const jy = (cy + 0.15 + 0.7 * r1) / cells - 0.5;
-      const offU = jx * edgeM;
-      const offV = jy * edgeM;
+  for (let cy = 0; cy < cellsV; cy++) {
+    for (let cx = 0; cx < cellsU; cx++) {
+      // Deterministic per-cell hashes (jitter x/z, kind/scale y). Global
+      // lattice: the cell's FACE-level index (seeded per face only) —
+      // identical across levels/ix/iy. Per-tile lattice (shallow): the old
+      // level/ix/iy-keyed hash, preserved for far-field variety.
+      let gu: number, gv: number, mU: number, mV: number;
+      if (global) {
+        gu = gu0 + cx;
+        gv = gv0 + cy;
+        // Jittered cell-center position in face-meters, then back to tile-
+        // local meters relative to the tile's U/V tangent origins.
+        mU = (gu + 0.15 + 0.7 * r0a(gu, gv, face)) * cellM - fu0;
+        mV = (gv + 0.15 + 0.7 * r0b(gu, gv, face)) * cellM - fv0;
+      } else {
+        gu = cx;
+        gv = cy;
+        mU = ((cx + 0.15 + 0.7 * r0a(cx, cy, face + level * 131 + ix * 7 + iy)) / cells - 0.5) * edgeM;
+        mV = ((cy + 0.15 + 0.7 * r0b(cx, cy, face + level * 131 + ix * 7 + iy)) / cells - 0.5) * edgeM;
+      }
+      const r1 = hash3i(gu, gv, face * 17 + 9002, SEED + 9002); // scale
+      const r2 = hash3i(gu, gv, face * 17 + 9003, SEED + 9003); // kind roll
+      const offU = mU;
+      const offV = mV;
 
       // Local surface position: project center + offsets back onto the sphere
       // so wide tiles keep objects on the curved surface.
@@ -145,7 +196,7 @@ export function buildTileScatter(
       if (h > snowH * 0.72 || slope > 0.55) {
         // Bare-rock band: rocks only, sparse.
         if (r2 < 0.05) {
-          const s = (0.6 + r0 * 1.3) * ROCK_M;
+          const s = (0.6 + r1 * 1.3) * ROCK_M;
           groundLocal(h);
           _scale.set(s, s * (0.7 + r1 * 0.6), s);
           rocks.push(new THREE.Matrix4().compose(_pos, _q, _scale));
@@ -157,12 +208,12 @@ export function buildTileScatter(
       const dry = m < -0.15;
       const forestness = dry ? 0.08 : 0.28 + m * 0.3;
       if (r2 < forestness) {
-        const scale = (0.8 + r0 * 0.9) * TREE_M;
+        const scale = (0.8 + r1 * 0.9) * TREE_M;
         groundLocal(h);
         _scale.set(scale, scale * (0.9 + r1 * 0.4), scale);
         trees.push(new THREE.Matrix4().compose(_pos, _q, _scale));
       } else if (r2 < forestness + 0.03) {
-        const s = (0.5 + r0 * 1.2) * ROCK_M;
+        const s = (0.5 + r1 * 1.2) * ROCK_M;
         groundLocal(h);
         _scale.set(s, s * (0.7 + r1 * 0.6), s);
         rocks.push(new THREE.Matrix4().compose(_pos, _q, _scale));

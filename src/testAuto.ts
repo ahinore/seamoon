@@ -3,6 +3,7 @@ import type { CameraRig } from './cameraRig';
 import type { WorldOrigin } from './world';
 import { moonPositionAtAngle } from './moonOrbit';
 import { EARTH, MOON, localToAbsolute, eastAt } from './frames';
+import { terrainHeight } from './terrain';
 
 const PLANET_R = EARTH.radius;
 const R_MOON = MOON.radius;
@@ -112,9 +113,22 @@ export class AutoPilot {
     // used by terrain tests to hover over known landmasses.
     // ?pitch (deg) tilts the view up from nadir (0 = straight down, -90 =
     // horizon) — reproduces grazing-angle LOD screens.
+    // ?agl=1: ?alt is measured from the TERRAIN (AGL) instead of the sphere —
+    // low-alt tests at high-elevation sites put the camera inside the ground
+    // otherwise (the sphere-based alt ignores terrainHeight at the hover
+    // point). Default 0 keeps the historical sphere-based behavior.
     const lat = num(q, 'lat', 0);
     const lon = num(q, 'lon', 0);
-    const pos = _pos.copy(localToAbsolute(EARTH, lat, lon, this.alt0, _pos));
+    const agl = q.get('agl') === '1';
+    let hoverAlt = this.alt0;
+    if (agl) {
+      const dir = localToAbsolute(EARTH, lat, lon, 1, _tmp).normalize();
+      const ground = terrainHeight(dir.x, dir.y, dir.z);
+      hoverAlt = Math.max(this.alt0 + ground, 2);
+      this.alt0 = hoverAlt;
+      this.alt1 = hoverAlt;
+    }
+    const pos = _pos.copy(localToAbsolute(EARTH, lat, lon, hoverAlt, _pos));
     this.world.origin.set(0, 0, 0);
     rig.camera.position.copy(pos);
     rig.camera.up.set(0, 1, 0);

@@ -243,6 +243,11 @@ const rig = new CameraRig(
   },
 );
 rig.camera.fov = fovDeg;
+// Initial aspect: the rig's camera is constructed with aspect=1 and only the
+// 'resize' event updated it — so on load the scene rendered square-projected
+// (planet visibly squashed into an ellipse) until the user resized the window.
+// Match the actual viewport once at startup; the listener handles the rest.
+rig.camera.aspect = window.innerWidth / window.innerHeight;
 rig.camera.updateProjectionMatrix();
 rigRef = rig;
 const _up = new THREE.Vector3();
