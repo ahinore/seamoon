@@ -53,31 +53,38 @@ export function makeCloudUniforms(planetR: number): CloudUniforms {
   };
 }
 
-export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.Mesh {
-  // MESH RADIUS vs SAMPLE ALTITUDE — decoupled. The shell sits ABOVE the
-  // highest terrain (peaks reach ~9.6 km; coarse LOD tiles displace whole
-  // mountain-octave regions 3-8 km up). At the slab-middle radius (3 km)
-  // those tiles poked THROUGH the shell: depth-culled shell fragments left
-  // round tile-sized holes where the ground showed as gray dots in a
-  // quasi-regular grid (the mountain lattice's 320 km wavelength). The far
-  // map is a flat texture of the deck — raising the MESH to 9.8 km costs
-  // nothing visually, while density sampling below still evaluates the
-  // slab-middle altitude so the map matches the volumetric near view.
-  const geo = new THREE.SphereGeometry(planetR + Math.max(CLOUD_TOP, 9800), 128, 96);
-  const mat = new THREE.ShaderMaterial({
-    uniforms: uniforms as unknown as { [k: string]: THREE.IUniform },
-    // DoubleSide: back hull serves ground-level views, front hull space views
-    side: THREE.DoubleSide,
-    transparent: true,
-    depthWrite: false,
-    vertexShader: /* glsl */ `
-      varying vec3 vWorld;
-      void main() {
-        vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */ `
+export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.Group {
+  // TWO HULLS share this material family. The single 9.8 km shell made the
+  // NEAR view broken: from 8 km looking down, every shell fragment lies
+  // BEHIND the ground (the ray exits the 9.8 km sphere beyond the planet
+  // horizon), so depth culling removed the whole deck and the volumetric
+  // march — which lives in the shell's fragment shader — never ran (the
+  // deck hugged the horizon only). Geometry:
+  //   FAR hull  @ R+9.8 km — above all terrain; owns the far map (wShell).
+  //   NEAR hull @ R+2.6 km — inside the slab; downward rays from any flight
+  //   altitude cross it BEFORE the ground, and uplooking rays from below
+  //   the deck cross it overhead. Owns the volumetric march (wVol).
+  const uNear = { value: 0 };
+  const makeMat = (near: number) => {
+    const m = new THREE.ShaderMaterial({
+      uniforms: { ...(uniforms as unknown as { [k: string]: THREE.IUniform }), uNearHull: { value: near } },
+      // DoubleSide: back hull serves ground-level views, front hull space views
+      side: THREE.DoubleSide,
+      transparent: true,
+      depthWrite: false,
+      vertexShader: /* glsl */ `
+        varying vec3 vWorld;
+        void main() {
+          vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: FRAGMENT,
+    });
+    return m;
+  };
+  void uNear;
+  const FRAGMENT = /* glsl */ `
       uniform vec3 uSunDir;
       uniform float uPlanetR;
       uniform vec3 uCamPos;
@@ -88,6 +95,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
       uniform float uTanHalfFov;
       uniform float uViewportH;
       uniform float uCloudDbg;
+      uniform float uNearHull;
       varying vec3 vWorld;
 
       // Float32-safe hash (IQ): fract() FIRST bounds every intermediate,
@@ -271,19 +279,23 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         // sat BELOW the mean: with cover ~0.4+ the smoothstep fired over
         // most of the field, every grazing ray saturated alpha within its
         // 40 km budget, and the deck read as a flat gray "water" sheet.
-        // thr is anchored WELL above the median so the deck stays SPARSE:
-        // low cover picks the top ~10% of puffs, high cover (~0.9) still
-        // only claims the top ~40%.
-        float thr = mix(0.70, 0.36, cover);
-        float d = smoothstep(thr, thr + edge, billow * (0.55 + 0.45 * cover));
+        // thr anchored WELL above the median kept the deck so sparse that
+        // (with the (0.55+0.45*cover) scale) only the top ~2-5% of the
+        // field passed — a nadir/grazing column crossed ZERO puffs and the
+        // near view showed no deck at all while the far shell showed a
+        // full layer (the "clouds vanish / near clouds pale" handoff).
+        // mix(0.55,0.30,cover) + (0.72+0.28*cover): top ~15-45% — dense
+        // enough to match the far map, still puff-shaped.
+        float thr = mix(0.55, 0.30, cover);
+        float d = smoothstep(thr, thr + edge, billow * (0.72 + 0.28 * cover));
         d = clamp(d * 1.35, 0.0, 1.0);
         // Cluster gate: the old smoothstep(0.42,0.62) was so tight that only
         // isolated weather-field speckles passed — clouds read as mottled
         // fuzz instead of coherent systems. The wide gate grows proper
-        // clusters; below it a thin sparse haze (0.12x) keeps clear skies
+        // clusters; below it a thin sparse haze (0.3x) keeps clear skies
         // limited to the genuinely dry weather troughs.
         float gate = max(smoothstep(0.40, 0.58, weather),
-                         0.12 * smoothstep(0.15, 0.35, weather));
+                         0.30 * smoothstep(0.15, 0.35, weather));
         d *= gate;
         return d;
       }
@@ -306,7 +318,28 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
 
         // ---------------- weather / coverage ----------------
         vec3 upF = normalize(vWorld - pc);
-        vec3 q = upF * 2.2; // weather scale ~ R/2.2
+        // Weather anchor: the direction where the ray MEETS THE SLAB, not
+        // the fragment's own sky direction. From below/at deck level the
+        // shell fragment sits 10-60 km up-sky from the actual march column
+        // (a 9° ray crosses the slab ~10 km out but exits the 9.8 km shell
+        // ~60 km out); anchoring weather to the FRAGMENT sampled a different
+        // weather cell than the deck the camera flies through — the deck
+        // overhead could be wet while the anchored cell was dry, so clouds
+        // VANISHED as you descended under them. Slab-midpoint intersection
+        // along the ray is the fair compromise for both LODs.
+        vec3 upW = upF;
+        {
+          float rMid = uPlanetR + ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)};
+          float b = dot(ro, rd);
+          float c = dot(ro, ro) - rMid * rMid;
+          float hq = b * b - c;
+          if (hq >= 0.0) {
+            float sq = sqrt(hq);
+            float tMid = (-b - sq) > 0.0 ? (-b - sq) : (-b + sq);
+            if (tMid > 0.0) upW = normalize(ro + rd * tMid);
+          }
+        }
+        vec3 q = upW * 2.2; // weather scale ~ R/2.2
         // Wind drift in METERS (same physical speed for every LOD): the old
         // per-use offsets (uTime*0.006 lattice cells) drifted the far map's
         // 70 km cells at ~420 m/s — clouds visibly crawled/spread across the
@@ -336,6 +369,22 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         float bands = 0.55 + 0.45 * cos(lat * 6.0) * 0.5 + 0.25 * exp(-pow((abs(lat) - 0.15) * 3.0, 2.0));
         float cover = clamp(uCover * bands * 1.6 * weatherM + (weatherM - 0.5) * 0.4, 0.0, 1.0);
         cover = pow(cover, 0.7); // bias toward more visible coverage
+
+        // MACRO COVERAGE shared by both LODs: the shell's sys/thr formula
+        // evaluated at the weather anchor direction. The far shell defines
+        // the deck's macro layout from this; coupling the volumetric march
+        // to the same term makes the near view AS DENSE AS THE FAR MAP —
+        // before this, the march's own sparse puff threshold meant the
+        // deck thinned drastically as the shell faded out (25→8 km), which
+        // read as "clouds disappear when you descend / near clouds pale".
+        float macroThr = mix(0.60, 0.50, cover);
+        float macroGate = max(smoothstep(0.34, 0.55, weatherM),
+                              0.12 * smoothstep(0.15, 0.35, weatherM));
+        float dMacro = smoothstep(macroThr, macroThr + 0.16,
+                                  max(0.62 * smoothstep(0.30, 0.62, weatherM) + 0.38 * weatherM * 0.5,
+                                      0.62 * smoothstep(0.30, 0.62, weatherM) - 0.10));
+        dMacro = pow(dMacro, 0.45) * macroGate;
+        float dMacroFrag = weatherM; // probe: anchor weather visibility
 
         // ============ M10.7 hybrid: shell + volumetric ==================
         // Complementary handoff: wShell = 1 - wVol (above the near gate), so
@@ -460,6 +509,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         // ============ volumetric march (near view) ====================
         vec3 volCol = vec3(0.0);
         float volT = 1.0; // transmittance
+        float dbgT0 = 0.0, dbgSpan = 0.0, dbgSteps = 0.0, dbgMaxD = 0.0;
         if (wVol > 0.001) {
           float rB = uPlanetR + ${CLOUD_BOTTOM.toFixed(1)};
           float rT = uPlanetR + ${CLOUD_TOP.toFixed(1)};
@@ -485,6 +535,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
           if (t1 > t0) {
             const int MAX_STEPS = 28;
             int steps = int(clamp(uVolSteps, 4.0, 28.0));
+            dbgT0 = t0; dbgSpan = (t1 - t0) / 18000.0; dbgSteps = float(steps) / 28.0;
             // cap the marched path: grazing rays through the slab would
             // accumulate alpha=1 over hundreds of km and read as a gray
             // wall. 18 km keeps distant air hazy instead of solid, and the
@@ -514,13 +565,51 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
               float detail = 1.0 / (1.0 + t * (1.0 / 8000.0));
               // ---- unified density: same function the far shell shows ----
               float d = cloudDensity(p, cover, weather, wind, 0.18, detail);
+              // PER-SAMPLE macro coupling: evaluate the shell's coverage
+              // formula at THIS sample's own direction. The per-fragment
+              // dMacro version failed: the gate terms are per-fragment
+              // constants that measured a different weather cell than the
+              // column being marched, capping the whole near deck at a
+              // uniform aV≈0.2 (probe) while the far shell showed 87%
+              // deck over the same lat/lon — the LOD mismatch behind both
+              // user complaints (pale near clouds / deck vanishing when
+              // descending under it).
+              vec3 upS = normalize(p);
+              float weatherMs = fbm2(upS * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
+              // raw billow for the sys texture term (cloudDensity's d is
+              // post-threshold and mostly 0 — the shell's sys blends the
+              // RAW f1, so recompute it here at the same pw scale)
+              // coarse f1 proxy at the shell's 152 km octave scale: the
+              // shell's sys blends its 5-octave fbm (mean 0.5) — using the
+              // near view's 3 km billow (mean 0.19) made the near macro
+              // gate 0.12 stricter than the far one and thinned the deck
+              // 17× (34% far vs 2% near over identical directions).
+              float f1s = 0.5 + gnoise3(upS * (uPlanetR * 6.28318 / 152000.0) + 91.7) * 0.35;
+              float wSysS = 0.62 * smoothstep(0.30, 0.62, weatherMs);
+              float sysS = max(wSysS + 0.38 * f1s * smoothstep(0.30, 0.55, weatherMs),
+                               wSysS - 0.10);
+              float macroThrS = mix(0.60, 0.50, cover);
+              // NEAR-SIDE BIAS: floor sysS 0.14 below the threshold (the
+              // far shell floors 0.055) and soften the weather gate. The
+              // near view must err toward cloud — from inside/below the
+              // deck, under-threshold macro cells read as "the clouds
+              // vanished" while the far shell still shows the system.
+              float dShell = smoothstep(macroThrS, macroThrS + 0.16,
+                                        max(sysS, macroThrS - 0.14));
+              d *= pow(dShell, 0.45)
+                 * max(smoothstep(0.30, 0.50, weatherMs),
+                       0.30 * smoothstep(0.12, 0.30, weatherMs));
               // edge erosion: high-frequency wisps carve the surface (fades
               // out with distance so far samples stay smooth); hf cells are
               // 640 m — same physical wind divided by that cell size
               float hf = fbm3o(p * (1.0 / 640.0) + wind * (1.0 / 640.0) * vec3(-1.7, 1.0, 0.8), detail * detail);
               d -= (1.0 - d) * hf * 0.35;
-              // vertical shaping: rounded bases, domed tops
-              d *= smoothstep(0.0, 0.18, h) * (0.55 + 0.45 * smoothstep(1.0, 0.55, h));
+              // vertical shaping: rounded bases, domed tops. The old
+              // smoothstep(0,0.18,h) left the bottom 430 m of the slab
+              // guaranteed-empty — from below, looking up through that
+              // dead zone plus thin bases, the deck vanished entirely.
+              // 0.06 keeps rounded bases but starts puffs at ~145 m.
+              d *= smoothstep(0.0, 0.06, h) * (0.55 + 0.45 * smoothstep(1.0, 0.55, h));
               d = clamp(d * 1.5, 0.0, 1.0);
               if (d > 0.015) {
                 // light march: 3 samples toward the sun (cheap 1-octave billow)
@@ -529,21 +618,29 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
                   vec3 pl = p + uSunDir * (float(j) * 220.0);
                   float fl = fbm3o(pl * (1.0 / 3000.0) + wind * (1.0 / 3000.0), 1.0);
                   float bl = 1.0 - abs(2.0 * fl - 1.0);
-                  // same threshold family as cloudDensity (thr = mix(0.70,0.36)):
-                  // the stale low threshold here made shadowing fire almost
-                  // everywhere, flattening the deck's shading
-                  float thrS = mix(0.70, 0.36, cover);
-                  od += smoothstep(thrS, thrS + 0.18, bl * (0.55 + 0.45 * cover)) * 220.0;
+                  // same threshold family as cloudDensity (thr = mix(0.55,0.30)):
+                  float thrS = mix(0.55, 0.30, cover);
+                  od += smoothstep(thrS, thrS + 0.18, bl * (0.72 + 0.28 * cover)) * 220.0;
                 }
-                float shadow = exp(-od * 0.0012);     // Beer-Lambert (gentler:
-                // the old 0.004 killed the sun term for every interior sample
-                // — top-down views of the deck read as a flat dark-gray sheet)
+                float shadow = exp(-od * 0.0008);     // Beer-Lambert, gentler:
+                // 0.0012/0.004 history — interior samples went near-black
+                // from orbit and the near-view deck read PALE GRAY next to
+                // the far shell's bright map (the handoff mismatch).
                 float powder = 1.0 - exp(-d * 4.0);   // dark edges, bright cores
-                // tops catch the sun: height-based ambient brightening
-                vec3 lit = vec3(1.0, 0.98, 0.95) * shadow * phase * (0.35 + 0.65 * powder)
-                         + vec3(0.55, 0.63, 0.78) * (0.40 + 0.35 * h); // sky ambient
-                float aStep = 1.0 - exp(-d * dt * 0.0022); // lower extinction:
-                // puffs stay translucent instead of piling into an opaque sheet
+                // tops catch the sun: height-based ambient brightening.
+                // Sun term floored higher + whiter ambient: the near-view
+                // deck must match the far shell's white, or the LOD
+                // handoff reads as the clouds fading (user report).
+                // 0.45 floor on shadow + stronger ambient: bases seen from
+                // below were rendering luma ~100 (near-black underbellies).
+                shadow = 0.45 + 0.55 * shadow;
+                vec3 lit = vec3(1.0, 0.98, 0.95) * shadow * phase * (0.55 + 0.45 * powder)
+                         + vec3(0.62, 0.68, 0.80) * (0.55 + 0.35 * h); // sky ambient
+                float aStep = 1.0 - exp(-d * dt * 0.005); // extinction tuned
+                // to the far shell's opacity (1-exp(-d*12)): with k=0.0022
+                // a full column only reached alpha≈0.4 — the deck stayed
+                // see-through from below (dark sky bled through, cloud
+                // pixels read luma ~100) and pale at the LOD handoff.
                 volCol += lit * aStep * volT;
                 volT *= 1.0 - aStep;
                 if (volT < 0.03) break;
@@ -565,12 +662,22 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
           ? (volCol * wVol + shellCol * (1.0 - wVol)) / max(wVol + (1.0 - wVol), 0.0001)
           : vec3(0.0);
         float alpha = cov;
-        // altitude-based opacity fade inside the band (flying through)
+        // altitude-based opacity fade inside the band (flying through).
+        // Floor 0.55 (was 0.35): inside/near the slab the deck used to dim
+        // so much that entering the clouds read as them DISAPPEARING.
         float inBand = smoothstep(0.0, 0.25, hLayer) * (1.0 - smoothstep(0.75, 1.0, hLayer));
         float farFade = clamp(abs(camAlt - ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)}) / 6000.0, 0.0, 1.0);
-        float bandFade = mix(0.35, 0.95, farFade * inBand + farFade * (1.0 - inBand));
+        float bandFade = mix(0.55, 0.95, farFade * inBand + farFade * (1.0 - inBand));
         alpha *= mix(bandFade, 1.0, step(8000.0, camAlt));
         alpha = clamp(alpha, 0.0, 1.0);
+        // ?cloudbg=2: march probe — R=aV*4, G=span/18km, B=steps/28,
+        // plus dbgMaxD folded into B's fraction. Diagnoses below-deck.
+        if (uCloudDbg > 1.5) {
+          // probe v6: mesh-masked by B=1: R=aV*4, G=weatherMs at anchor
+          gl_FragColor = vec4(clamp(aV * 4.0, 0.0, 1.0), clamp(0.5 + 0.5 * dMacroFrag, 0.0, 1.0), 1.0, 1.0);
+          #include <colorspace_fragment>
+          return;
+        }
         // night fade
         float sunH = dot(up0, uSunDir);
         col *= smoothstep(-0.12, 0.08, sunH);
@@ -579,10 +686,32 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.M
         gl_FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
         #include <colorspace_fragment>
       }
-    `,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.frustumCulled = false;
-  mesh.renderOrder = 4; // before the atmosphere shell (5), after sea (1)
-  return mesh;
+    `;
+  const nearGeo = new THREE.SphereGeometry(planetR + 2600, 128, 96);
+  const farGeo = new THREE.SphereGeometry(planetR + Math.max(CLOUD_TOP, 9800), 128, 96);
+  const nearMat = makeMat(1);
+  const farMat = makeMat(0);
+  nearMat.fragmentShader = FRAGMENT.replace('float wShell =',
+    'if (uNearHull < 0.5) { gl_FragColor = vec4(0.0); return; }\n      float wShell =');
+  farMat.fragmentShader = FRAGMENT.replace('if (wVol > 0.001) {',
+    'if (uNearHull > 0.5) { gl_FragColor = vec4(0.0); return; }\n      if (wVol > 0.001) {');
+  const nearMesh = new THREE.Mesh(nearGeo, nearMat);
+  const farMesh = new THREE.Mesh(farGeo, farMat);
+  // NEAR hull: depth-test OFF. Inside/above the slab the hull fragments
+  // sit BEHIND terrain along most downward rays (mountains reach 9.6 km,
+  // the hull is at 2.6 km), so depth culling erased ~98% of the near
+  // deck (measured: 1.6% of the frame rasterized over land). With the
+  // depth test off the near deck always renders; the only artifact is
+  // thin deck painted over a peak that is in front of it — minor next
+  // to "clouds vanish when descending". The far hull stays depth-tested
+  // (it sits above all terrain, so culling is correct there).
+  nearMat.depthTest = false;
+  nearMesh.frustumCulled = false;
+  farMesh.frustumCulled = false;
+  nearMesh.renderOrder = 4; // before the atmosphere shell (5), after sea (1)
+  farMesh.renderOrder = 4;
+  const group = new THREE.Group();
+  group.add(nearMesh);
+  group.add(farMesh);
+  return group;
 }

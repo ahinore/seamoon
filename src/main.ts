@@ -188,8 +188,10 @@ const clouds = makeCloudMesh(R, cloudUniforms);
 scene.add(clouds);
 if (urlParams.get('clouds') === '0') clouds.visible = false;
 // ?cloudbg=1: color-code which term suppresses the far deck (red = fbm
-// below threshold, green = weather gate, yellow = partial).
+// below threshold, green = weather gate, yellow = partial). 2 = march
+// probe for the below-deck view.
 if (urlParams.get('cloudbg') === '1') cloudUniforms.uCloudDbg.value = 1;
+if (urlParams.get('cloudbg') === '2') cloudUniforms.uCloudDbg.value = 2;
 
 // M10.5: vegetation lighting shares the same sun-direction object as the
 // terrain/atmosphere — trees and ground can never disagree on the light.
