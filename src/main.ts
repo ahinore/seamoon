@@ -187,6 +187,9 @@ cloudUniforms.uSunDir = atmoUniforms.uSunDir; // share the sun object
 const clouds = makeCloudMesh(R, cloudUniforms);
 scene.add(clouds);
 if (urlParams.get('clouds') === '0') clouds.visible = false;
+// ?cloudbg=1: color-code which term suppresses the far deck (red = fbm
+// below threshold, green = weather gate, yellow = partial).
+if (urlParams.get('cloudbg') === '1') cloudUniforms.uCloudDbg.value = 1;
 
 // M10.5: vegetation lighting shares the same sun-direction object as the
 // terrain/atmosphere — trees and ground can never disagree on the light.
@@ -505,6 +508,8 @@ renderer.setAnimationLoop(() => {
   cloudUniforms.uCamPos.value.copy(rig.camera.position);
   cloudUniforms.uOrigin.value.copy(world.origin);
   cloudUniforms.uTime.value = performance.now() / 1000;
+  cloudUniforms.uTanHalfFov.value = Math.tan(THREE.MathUtils.degToRad(rig.camera.fov) * 0.5);
+  cloudUniforms.uViewportH.value = window.innerHeight;
   // Moon orbit: the absolute position is written into the MOON frame center
   // (M9.6: the registry entry is the single source of truth — PlanetView,
   // flight physics and the nearest-body rule all read this one vector).
@@ -528,6 +533,16 @@ renderer.setAnimationLoop(() => {
 
   renderer.render(scene, rig.camera);
   hud.frame(dt);
+
+  // M10.8 reentry plasma overlay: brightness follows the flight model's
+  // normalized stagnation heat (orbital mode, earth atmosphere only).
+  {
+    const plasma = document.getElementById('plasma') as HTMLElement | null;
+    if (plasma) {
+      const h = flight.heat;
+      plasma.style.opacity = (0.9 * h).toFixed(3); // linear: glow tracks heat
+    }
+  }
 
   const s = planet.stats;
   // HUD altitude is relative to the NEAREST body (lunar hover shows lunar alt)

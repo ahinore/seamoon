@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { terrainHeight } from './terrain';
+import { ATMOSPHERE_TOP as ATMOS_TOP } from './atmosphere';
 import { moonHeight } from './moon';
 import { moonCenterFromParams, MOON_ORBIT_R } from './moonOrbit';
 import { propagateKepler, elementsOf, SOI_MOON, type OrbitalElements } from './orbit';
@@ -133,6 +134,16 @@ export class FlightModel {
   /** Target apoapsis radius for the TLI burn, m. */
   private tliRa = 344e6;
 
+  // --- M10.8 entry telemetry (orbital mode, earth atmosphere) ---
+  /** Normalized plasma/heat glow 0..1 (drives the viewport entry effect). */
+  heat = 0;
+  /** Stagnation heat flux, W/m^2 (Sutton-Graves). */
+  heatFlux = 0;
+  /** Deceleration load in g. */
+  gLoad = 0;
+  /** ?pe= test hook: elliptical spawn with this periapsis (null = circular). */
+  private peOverride: number | null = null;
+
   // autopilot mission state
   private apPhase = 'off';
   private apT = 0;
@@ -198,6 +209,12 @@ export class FlightModel {
       this.spawnH = num(q, 'alt', 200_000);
       this.prop = 6000;
       this.coastWarp = clamp(num(q, 'warp', 6000), 1, 50_000);
+      // ?pe=<m>: spawn directly on an elliptical orbit with this periapsis
+      // (M10.8 entry testing — a low pe like 20000 dives the orbit into the
+      // atmosphere without waiting for the TLI/moon loop). The spawn stays
+      // AT apoapsis (radius R+alt) with circular speed for that radius, so
+      // the craft falls toward the pe on the far side.
+      this.peOverride = q.has('pe') ? num(q, 'pe', 200_000) : null;
       // Transfer apoapsis exactly at the moon's orbital radius: with the
       // moon frozen at +X the transfer ellipse ends right on the moon
       // center, so the craft plunges deep into the SOI — the boundary
@@ -229,12 +246,16 @@ export class FlightModel {
   /** Position/attitude state at the spawn point (no camera write). */
   private spawnStateInit(): void {
     if (this.mode === 'orbital') {
-      // circular LEO at spawnH above the start direction
+      // circular LEO at spawnH above the start direction (?pe= makes it an
+      // ellipse with that periapsis, apoapsis at the spawn radius)
       this.pos.copy(this.spawnDir).multiplyScalar(R + this.spawnH);
       const vc = Math.sqrt(MU / (R + this.spawnH));
       // prograde tangent: spawnDir x worldY (verified against elementsOf:
       // yields e<1e-6 circular)
-      this.vel.copy(this.spawnDir).cross(this.WORLD_Y).normalize().multiplyScalar(vc);
+      this.vel.copy(this.spawnDir).cross(this.WORLD_Y).normalize()
+        .multiplyScalar(this.peOverride !== null
+          ? Math.sqrt(Math.max(MU * (2 / (R + this.spawnH) - 2 / (R + this.spawnH + this.peOverride)), 1)) // vis-viva at apoapsis, a=(ra+pe)/2
+          : vc);
       this.q.identity();
       this.thr = 0;
       this.frozen = false;
@@ -685,6 +706,48 @@ export class FlightModel {
     this.tVs = this.vel.dot(up2);
     this.tGs = this.vel.length();
     this.tIas = 0;
+
+    // --- M10.8: atmospheric entry (earth atmosphere only) ----------------
+    // Below the atmosphere top the Kepler rail is no longer the whole story:
+    // drag bleeds energy, the craft decelerates, heats, and eventually falls
+    // ballistically. Sub-stepped numeric integration replaces the analytic
+    // rail inside the atmosphere (small slices keep the v^3 heating and the
+    // drag honest at 100x warp); outside it the rail stays exact.
+    this.heat = 0;
+    if (this.primMu === MU && alt < ATMOS_TOP) {
+      // slice the step into <=0.25 s pieces (at 100x warp dt is ~1.7 s)
+      const v0 = this.vel.length();
+      let remaining = dt;
+      while (remaining > 1e-6) {
+        const h = Math.min(remaining, 0.25);
+        remaining -= h;
+        const rr = _oR.copy(this.pos).sub(this.primC);
+        const upS = _oUp.copy(rr).multiplyScalar(1 / rr.length());
+        const altS = rr.length() - R;
+        if (altS >= ATMOS_TOP) break; // skipped back out (skip-up trajectory)
+        const rho = isaDensity(Math.max(altS, 0));
+        const vS = this.vel.length();
+        // deceleration: drag on a ~5 m^2 blunt heat-shield, Cd 1.2
+        const dragA = 1.2 * 0.5 * rho * vS * vS * 5.0 / (this.mLand + this.prop);
+        // stagnation heat flux (Sutton-Graves, k=1.7e-4, W/m^2) -> telemetry
+        this.heatFlux = 1.7e-4 * Math.sqrt(rho) * vS * vS * vS;
+        this.gLoad = dragA / 9.80665;
+        this.vel.addScaledVector(this.vel, -dragA * h / Math.max(vS, 1e-6));
+        // gravity during the slice (rail no longer carries it)
+        this.vel.addScaledVector(upS, -this.primMu / (rr.length() * rr.length()) * h);
+        this.pos.addScaledVector(this.vel, h);
+        // peak heat drives the glow: normalized 0..1 over ~1 MW/m^2 with
+        // a slow cool-down so the plasma persists through the peak region
+        this.heat = Math.max(this.heat, clamp(this.heatFlux / 1e6, 0, 1));
+      }
+      this.heat = Math.max(this.heat, this.heat * Math.exp(-dt * 0.35));
+      // ENTRY note: set once heat is significant, keep it until landing/impact
+      if (this.heat > 0.03 && (this.apPhase === 'lunar-orbit' || this.apPhase === 'trans-lunar' || this.apPhase === 'soi-moon')) {
+        this.note = 'ENTRY';
+      }
+      this.tGs = this.vel.length();
+    }
+
     // ground/crash guard (never expected on a clean orbit, but a bad burn
     // can drop periapsis into the planet)
     const surfR = (this.primMu === MU ? R : R_MOON) + (this.primMu === MU
@@ -1011,12 +1074,16 @@ export class FlightModel {
       const body = this.primMu === MU ? 'E' : 'M';
       const el = this.el;
       const apo = el.ra === Infinity ? '∞' : fmtM(el.ra - (body === 'E' ? R : R_MOON));
+      const entry = this.heatFlux > 1e4
+        ? `  HEAT ${(this.heatFlux / 1e6).toFixed(2)}MW/m2  ${this.gLoad.toFixed(1)}g`
+        : '';
       return (
         `ORBIT(${body}) GS ${s.gs.toFixed(0)} m/s  ALT ${fmtM(s.agl)}  ` +
         `a ${fmtM(el.a)}  e ${el.e.toFixed(4)}  ` +
         `Pe ${fmtM(el.rp - (body === 'E' ? R : R_MOON))}  Ap ${apo}  ` +
         `T ${el.period > 0 ? (el.period / 60).toFixed(1) + 'min' : '--'}  ` +
-        `PROP ${this.prop.toFixed(0)}kg  [${s.phase}${s.note ? ' ' + s.note : ''}]`
+        `PROP ${this.prop.toFixed(0)}kg  [${s.phase}${s.note ? ' ' + s.note : ''}]` +
+        entry
       );
     }
     return (
