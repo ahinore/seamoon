@@ -145,6 +145,12 @@ export class FlightModel {
   private paraOpen = false;
   /** M10.8e: entry rumble 0..1 (peak q this step; decays each frame). */
   private shake = 0;
+  /** M10.9: last slice's air density (kg/m^3) for the audio wind layer. */
+  airDensity = 0;
+  /** M10.9: true while the lob booster is firing (audio layer gate). */
+  get boostPhase(): boolean {
+    return this.lob && this.apPhase === 'boost';
+  }
 
   // --- M10.8 entry telemetry (orbital mode, earth atmosphere) ---
   /** Normalized plasma/heat glow 0..1 (drives the viewport entry effect). */
@@ -164,7 +170,7 @@ export class FlightModel {
 
   // cached per-step telemetry for the HUD
   private tIas = 0;
-  private tGs = 0;
+  tGs = 0; // public for the audio engine (M10.9); rest stay private
   private tAgl = 0;
   private tVs = 0;
   private tAoa = 0;
@@ -831,6 +837,7 @@ export class FlightModel {
         const altS = rr.length() - R;
         if (altS >= ATMOS_TOP) break; // skipped back out (skip-up trajectory)
         const rho = isaDensity(Math.max(altS, 0));
+        this.airDensity = rho;
         const vS = this.vel.length();
         // descending = retrograde motion along up (the burn/chute/shield
         // staging only apply on the way DOWN, not on the lob ascent)

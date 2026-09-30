@@ -12,6 +12,7 @@ import { makeMoonMaterial } from './moonMaterial';
 import { moonPosition, moonPositionAtAngle } from './moonOrbit';
 import { MOON_BODY } from './moonBody';
 import { EARTH, MOON, nearestFrame } from './frames';
+import { FlightAudio, updateFlightAudio } from './audio';
 
 const R = EARTH.radius;
 
@@ -43,6 +44,8 @@ const renderer = new THREE.WebGLRenderer({
   // the altitude-adaptive near plane stays the default until verified.
   reverseDepthBuffer: urlParams.get('revz') === '1',
 });
+// M10.9 procedural flight audio (?audio=0 disables; starts on first gesture)
+const audio = new FlightAudio(urlParams.get('audio') !== '0');
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 // M10.3: HDR tone mapping. Terrain/sea shaders output HDR values (sun glint
@@ -327,7 +330,9 @@ function toggleFlight(): void {
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyF' && !e.repeat) toggleFlight();
   if (e.code === 'KeyR' && rig.stickMode && !e.repeat) flight.reset();
+  audio.resume(); // any key: browsers need a gesture to start sound
 });
+document.addEventListener('pointerdown', () => audio.resume());
 // In flight mode the rig's own R handler must not fire (R = respawn there).
 // The rig listens on window too; guard it via stickMode inside the rig.
 
@@ -481,6 +486,8 @@ renderer.setAnimationLoop(() => {
       rig.update(dt);
       flight.step(dt);
       world.abs(rig.camera.position, absCam);
+      // M10.9 audio: booster on during the lob boost phase
+      updateFlightAudio(audio, flight, flight.boostPhase);
     } else {
       rig.update(dt);
       autoLine = auto.update(rig, dt);
@@ -551,6 +558,7 @@ renderer.setAnimationLoop(() => {
   if (!__flightExposed) {
     __flightExposed = true;
     (window as unknown as { __flight: unknown }).__flight = flight;
+    (window as unknown as { __audio: unknown }).__audio = audio; // M10.9 probe
   }
 
   // M10.8 reentry plasma overlay: brightness follows the flight model's
