@@ -371,6 +371,11 @@ export class FlightModel {
         Math.cos(latL * DEG) * Math.sin(lonL * DEG),
       );
       this.pos.copy(localToAbsolute(MOON, latL, lonL, hSurf + this.spawnH, this.pos));
+      // M11c: the lander's primary body is the moon from the first frame —
+      // leave primC at the earth origin and every primC-relative consumer
+      // (the prograde-horizon camera, altitude) aims 383 Mm off-target.
+      this.primC.copy(this.moonC);
+      this.primMu = MU_MOON;
       // slight HORIZONTAL drift to null out (east at spawn (1,0,0) is -Z:
       // east = worldY x up = (0,1,0)x(1,0,0) = (0,0,-1))
       this.vel.set(0, 0, -6);

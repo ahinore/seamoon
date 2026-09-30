@@ -501,6 +501,7 @@ renderer.setAnimationLoop(() => {
       rebased++;
       planet.forceReposition(world.origin);
       sea.forceReposition(world.origin);
+      moonView.forceReposition(world.origin); // M11c: the moon tiles went stale too
     }
 
     planet.update(rig.camera, world.origin, window.innerHeight);
@@ -580,6 +581,8 @@ renderer.setAnimationLoop(() => {
     (window as unknown as { __flight: unknown }).__flight = flight;
     (window as unknown as { __audio: unknown }).__audio = audio; // M10.9 probe
     (window as unknown as { __moonmat: unknown }).__moonmat = moonMaterial; // M11c probe
+    (window as unknown as { __moonview: unknown }).__moonview = moonView; // M11c probe
+    (window as unknown as { __world: unknown }).__world = world; // M11c probe
   }
 
   // M10.8 reentry plasma overlay: brightness follows the flight model's
