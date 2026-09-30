@@ -135,6 +135,10 @@ export class FlightModel {
   private tliRa = 344e6;
   /** ?notli=1: suppress the demo TLI burn (entry-testing orbits). */
   private noTli = false;
+  /** ?lob=1: suborbital hop (pad launch → ballistic reentry). */
+  private lob = false;
+  /** M10.8c: main parachute staged (earth entry, <9 km and subsonic). */
+  private paraOpen = false;
 
   // --- M10.8 entry telemetry (orbital mode, earth atmosphere) ---
   /** Normalized plasma/heat glow 0..1 (drives the viewport entry effect). */
@@ -218,6 +222,11 @@ export class FlightModel {
       // the craft falls toward the pe on the far side.
       this.peOverride = q.has('pe') ? num(q, 'pe', 200_000) : null;
       this.noTli = q.has('notli');
+      // ?lob=1 (M10.8c): suborbital hop instead of an orbit — spawn on the
+      // pad and lob up (v=2300 m/s at 45°, apogee ~180 km). The reentry
+      // speed is ~2.3 km/s instead of orbital 7.8 km/s, so the shield +
+      // chute + landing burn can actually bring the craft down intact.
+      this.lob = q.has('lob');
       // Transfer apoapsis exactly at the moon's orbital radius: with the
       // moon frozen at +X the transfer ellipse ends right on the moon
       // center, so the craft plunges deep into the SOI — the boundary
@@ -249,6 +258,38 @@ export class FlightModel {
   /** Position/attitude state at the spawn point (no camera write). */
   private spawnStateInit(): void {
     if (this.mode === 'orbital') {
+      // M10.8c ?lob=1: suborbital hop — spawn on the pad, lob at 45°.
+      // Reentry at ~2.3 km/s is survivable with the shield+chute stack.
+      if (this.lob) {
+        // Day-side pad (lon 0, subsolar): the night-side -X spawn would
+        // make the whole hop a black screen. Moon-facing -X is only
+        // needed for the TLI geometry, not a suborbital hop.
+        this.spawnDir.set(1, 0, 0);
+        const up = _oUp.copy(this.spawnDir);
+        const tan = _oRail.copy(this.spawnDir).cross(this.WORLD_Y).normalize();
+        // pad sits on the local terrain so the camera doesn't start
+        // inside a mountain
+        const padTh = terrainHeight(up.x, up.y, up.z);
+        this.pos.copy(up).multiplyScalar(R + Math.max(padTh, 0) + 50);
+        this.vel.copy(up).multiplyScalar(2300 * Math.SQRT1_2)
+          .addScaledVector(tan, 2300 * Math.SQRT1_2);
+        this.q.identity();
+        this.thr = 0;
+        this.frozen = false;
+        this.note = 'LOB';
+        this.orbT = 0;
+        this.prop = 6000;
+        this.inMoonSoi = false;
+        this.paraOpen = false;
+        this.heat = 0;
+        this.heatFlux = 0;
+        this.gLoad = 0;
+        this.primC.set(0, 0, 0);
+        this.primMu = MU;
+        this.apPhase = 'off'; // no TLI phases on a hop
+        elementsOf(_oR.copy(this.pos), this.vel, MU, this.el);
+        return;
+      }
       // circular LEO at spawnH above the start direction (?pe= makes it an
       // ellipse with that periapsis, apoapsis at the spawn radius)
       this.pos.copy(this.spawnDir).multiplyScalar(R + this.spawnH);
@@ -270,6 +311,10 @@ export class FlightModel {
       this.orbT = 0;
       this.prop = 6000;
       this.inMoonSoi = false;
+      this.paraOpen = false;
+      this.heat = 0;
+      this.heatFlux = 0;
+      this.gLoad = 0;
       this.primC.set(0, 0, 0);
       this.primMu = MU;
       this.apPhase = 'coast';
@@ -726,34 +771,67 @@ export class FlightModel {
     // rail inside the atmosphere (small slices keep the v^3 heating and the
     // drag honest at 100x warp); outside it the rail stays exact.
     this.heat = 0;
+    // M10.8c parachute: a 10.2 t lander on a 28 m² shield alone still hits
+    // at ~60 m/s. Below 9 km and subsonic (<340 m/s), stage a main chute —
+    // 650 m² / Cd 1.4 gives a survivable ~14 m/s splashdown.
+    const paraA = this.paraOpen ? 650.0 : 0.0;
+    if (!this.paraOpen && this.primMu === MU
+        && alt < 9000 && this.vel.length() < 340 && this.vel.dot(up2) < 0) {
+      this.paraOpen = true;
+      this.note = 'PARACHUTE';
+    }
     if (this.primMu === MU && alt < ATMOS_TOP) {
-      // slice the step into <=0.25 s pieces (at 100x warp dt is ~1.7 s)
+      // Integrate the SAME warp-scaled step the rail used (wdt), sliced
+      // into <=0.25 s pieces. M10.8c fix: this block previously advanced
+      // by raw dt while the rail advanced dt*warp — at warp 10 the craft
+      // coasted 10x faster than the atmosphere dragged it, so entry never
+      // decelerated and every warp>1 landing lithobraked.
+      // Bounded work: at extreme warp cap the slice count (coarser slices,
+      // drag still bleeds the energy — precision matters less than staying
+      // interactive during 20000x coast frames).
       const v0 = this.vel.length();
-      let remaining = dt;
+      const slices = Math.min(Math.ceil(wdt / 0.25), 96);
+      const h = wdt / slices;
+      let remaining = wdt;
       while (remaining > 1e-6) {
-        const h = Math.min(remaining, 0.25);
-        remaining -= h;
+        const step = Math.min(h, remaining);
+        remaining -= step;
         const rr = _oR.copy(this.pos).sub(this.primC);
         const upS = _oUp.copy(rr).multiplyScalar(1 / rr.length());
         const altS = rr.length() - R;
         if (altS >= ATMOS_TOP) break; // skipped back out (skip-up trajectory)
         const rho = isaDensity(Math.max(altS, 0));
         const vS = this.vel.length();
+        // descending = retrograde motion along up (the burn/chute/shield
+        // staging only apply on the way DOWN, not on the lob ascent)
+        const vsS = this.vel.dot(upS);
+        const descending = vsS < 0;
         // M10.8: once the plasma is hot the ablative heat shield deploys:
         // the bare lander hull has a small 5 m² attached area (ok for a
         // propulsive moon landing) but orbital entry needs a blunt shield —
         // scale to a Dragon-class 28 m² / Cd 1.5 when heating is significant.
-        const shieldA = this.heat > 0.05 ? 28.0 : 5.0;
-        const shieldCd = this.heat > 0.05 ? 1.5 : 1.2;
-        // deceleration: drag on the shield, mass = dry lander + propellant
-        const dragA = shieldCd * 0.5 * rho * vS * vS * shieldA / (this.mLand + this.prop);
+        const shieldA = this.heat > 0.05 && descending ? 28.0 : 5.0;
+        const shieldCd = this.heat > 0.05 && descending ? 1.5 : 1.2;
+        // deceleration: drag on the shield + staged main chute (Cd*A sums)
+        const dragA = (shieldCd * shieldA + (this.paraOpen && descending ? 1.4 * paraA : 0))
+          * 0.5 * rho * vS * vS / (this.mLand + this.prop);
         // stagnation heat flux (Sutton-Graves, k=1.7e-4, W/m^2) -> telemetry
-        this.heatFlux = 1.7e-4 * Math.sqrt(rho) * vS * vS * vS;
+        this.heatFlux = descending ? 1.7e-4 * Math.sqrt(rho) * vS * vS * vS : 0;
         this.gLoad = dragA / 9.80665;
-        this.vel.addScaledVector(this.vel, -dragA * h / Math.max(vS, 1e-6));
+        // M10.8c landing burn: the lander's engine (45 kN, TWR 0.45 earth)
+        // can't hover but adds ~4.9 km/s of dv over the tank — enough to
+        // finish what the shield started. Retro-thrust below 40 km, past
+        // the plasma peak (heat<0.5: the flux itself keeps RISING through
+        // the thick-air phase, so gating on flux would never open).
+        if (this.prop > 0 && descending && altS < 40000 && this.heat < 0.5 && vS > 60) {
+          const acc = this.THRUST_LANDER / (this.mLand + this.prop);
+          this.vel.addScaledVector(this.vel, -Math.min(acc * step / Math.max(vS, 1e-6), 0.9));
+          this.prop = Math.max(0, this.prop - this.BURN_RATE * step);
+        }
+        this.vel.addScaledVector(this.vel, -dragA * step / Math.max(vS, 1e-6));
         // gravity during the slice (rail no longer carries it)
-        this.vel.addScaledVector(upS, -this.primMu / (rr.length() * rr.length()) * h);
-        this.pos.addScaledVector(this.vel, h);
+        this.vel.addScaledVector(upS, -this.primMu / (rr.length() * rr.length()) * step);
+        this.pos.addScaledVector(this.vel, step);
         // peak heat drives the glow: normalized 0..1 over ~1 MW/m^2 with
         // a slow cool-down so the plasma persists through the peak region
         this.heat = Math.max(this.heat, clamp(this.heatFlux / 1e6, 0, 1));
@@ -767,19 +845,33 @@ export class FlightModel {
     }
 
     // ground/crash guard (never expected on a clean orbit, but a bad burn
-    // can drop periapsis into the planet)
+    // can drop periapsis into the planet). M10.8c: r2 was captured BEFORE
+    // the atmospheric block moved the craft — recompute so a soft chute
+    // touchdown is detected the same frame instead of oscillating around
+    // the surface (rail + drag fighting each frame).
+    const r2b = _oR.copy(this.pos).sub(this.primC);
+    const up2b = _oUp.copy(r2b).multiplyScalar(1 / r2b.length());
     const surfR = (this.primMu === MU ? R : R_MOON) + (this.primMu === MU
-      ? terrainHeight(up2.x, up2.y, up2.z)
-      : moonHeight(up2.x, up2.y, up2.z));
-    if (r2.length() < surfR) {
+      ? terrainHeight(up2b.x, up2b.y, up2b.z)
+      : moonHeight(up2b.x, up2b.y, up2b.z));
+    if (r2b.length() < surfR) {
+      this.pos.copy(up2b).multiplyScalar(surfR).add(this.primC);
+      const vsTouch = this.vel.dot(up2b);
+      this.vel.set(0, 0, 0);
+      this.paraOpen = false;
       this.frozen = true;
-      this.note = 'IMPACT';
+      // touchdown classification: chute terminal ~20 m/s lands intact,
+      // anything faster is a crash
+      this.note = vsTouch > -30 ? 'LANDED' : 'CRASHED';
       this.apPhase = 'off';
       // M10.8: clear entry telemetry — otherwise the HUD shows a stale
       // HEAT/g readout forever after touchdown.
       this.heatFlux = 0;
       this.gLoad = 0;
       this.heat = 0;
+      this.tAgl = 0;
+      this.tVs = 0;
+      this.tGs = 0;
     }
   }
 
