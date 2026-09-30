@@ -137,6 +137,11 @@ export class FlightModel {
   private noTli = false;
   /** ?lob=1: suborbital hop (pad launch → ballistic reentry). */
   private lob = false;
+  /** ?full=1: TLI → 15km-perilune capture → powered descent → landing. */
+  private fullMission = false;
+  /** M11 descent autopilot state: r-trend around the moon. */
+  private lastR = 0;
+  private rTrendUp = false;
   /** ?lob=1 boost-phase clock, s (MECO at 60). */
   private lobT = 0;
   /** ?lob=1 booster thrust, N (TWR ~9 at ignition). */
@@ -150,6 +155,13 @@ export class FlightModel {
   /** M10.9: true while the lob booster is firing (audio layer gate). */
   get boostPhase(): boolean {
     return this.lob && this.apPhase === 'boost';
+  }
+  /** M11 probe: moon-relative horizontal speed during descent. */
+  get probeHoriz(): number {
+    if (this.primMu !== MU_MOON) return 0;
+    const r = _oR.copy(this.pos).sub(this.moonC);
+    const up = _oUp.copy(r).normalize();
+    return _oB1.copy(this.vel).addScaledVector(up, -this.vel.dot(up)).length();
   }
 
   // --- M10.8 entry telemetry (orbital mode, earth atmosphere) ---
@@ -234,6 +246,14 @@ export class FlightModel {
       // the craft falls toward the pe on the far side.
       this.peOverride = q.has('pe') ? num(q, 'pe', 200_000) : null;
       this.noTli = q.has('notli');
+      // ?full=1 (M11): the complete TLI → capture → powered-descent →
+      // landing scenario. Capture targets a 15 km perilune ellipse
+      // directly and the descent autopilot takes over at perilune.
+      this.fullMission = q.has('full');
+      // The landing burn alone needs ~1.4 t (1730 m/s at ve 5625 from the
+      // 15 km-perilune ellipse); TLI + capture eat 7.3 t of tank, so the
+      // full mission spawns with a tanker-tender budget.
+      if (this.fullMission) this.prop = 14000;
       // ?lob=1 (M10.8c): suborbital hop instead of an orbit — spawn on the
       // pad and lob up (v=2300 m/s at 45°, apogee ~180 km). The reentry
       // speed is ~2.3 km/s instead of orbital 7.8 km/s, so the shield +
@@ -323,7 +343,7 @@ export class FlightModel {
       this.frozen = false;
       this.note = '';
       this.orbT = 0;
-      this.prop = 6000;
+      this.prop = this.fullMission ? 14000 : 6000;
       this.inMoonSoi = false;
       this.paraOpen = false;
       this.heat = 0;
@@ -670,6 +690,13 @@ export class FlightModel {
     // dt; warp scales the mission clock too so phase timers (TLI after one
     // parking-orbit period) fire in demo-realistic wall time.
     let wdt = dt * this.coastWarp;
+    // M11: auto-drop warp for the powered descent — 20000x would hand
+    // the autopilot 3.5 s slices (limit-cycle bounce off the moon);
+    // landing control needs <=0.5 s slices, i.e. warp <= 30 at 60 fps.
+    if (this.apPhase === 'lunar-orbit' && this.fullMission) {
+      const rAg = _oR.copy(this.pos).sub(this.moonC).length() - R_MOON;
+      if (rAg < 200_000) wdt = Math.min(wdt, dt * 30);
+    }
     // clamp the final coast step so TLI ignites exactly on the node (the
     // spawn point: the raise ellipse's apoapsis then faces the frozen moon)
     // (M10.8: only when a TLI is armed — with ?notli=1 the clamp would
@@ -707,12 +734,105 @@ export class FlightModel {
         this.note = 'MECO';
       }
       this.orbT -= wdt; // boost time is not coast time
-    } else if (this.apPhase !== 'tli') {
-      const rail = _oRail.copy(this.pos).sub(this.primC);
-      const railV = _oRailV.copy(this.vel);
-      propagateKepler(rail, railV, this.primMu, wdt, _oNew, _oNewV);
-      this.pos.copy(this.primC).add(_oNew);
-      this.vel.copy(_oNewV);
+    } else {
+      // M11 ?full=1 powered descent: engage above the horizon — braking
+      // 2.3 km/s of orbital speed takes ~270 s at 8.6 m/s², so starting
+      // at 20 km AGL impacts first. 120 km AGL gives ~350 s of fall time
+      // (g_moon 1.62) — just enough. Everything higher coasts on the rail.
+      const rAg = _oR.copy(this.pos).sub(this.primC);
+      const aglNow = rAg.length() - (this.primMu === MU_MOON ? R_MOON : 0);
+      const descendingNow = this.apPhase === 'lunar-orbit' && this.fullMission
+        && this.primMu === MU_MOON && aglNow < 120_000;
+      if (descendingNow) {
+      // --- M11 powered descent --------------------------------------------
+      // Captured into the 15 km-perilune ellipse: numeric thrust replaces
+      // the rail from perilune approach until touchdown. Sliced like the
+      // atmosphere block. Autopilot:
+      //   1. above 20 km AGL: coast on the rail (handled below the else-if)
+      //   2. below 20 km: null horizontal velocity first (retro-thrust on
+      //      the horizontal component), then hold VS ≈ -8 m/s to touchdown.
+      // The moon has no atmosphere, so this is pure rocket braking.
+      const rRel = _oR.copy(this.pos).sub(this.moonC);
+      const r = rRel.length();
+      const upB = _oUp.copy(rRel).multiplyScalar(1 / r);
+      const agl = r - R_MOON;
+      const vRel = this.vel; // moon frozen: absolute = moon-relative
+      const vsB = vRel.dot(upB);
+      const vHoriz = _oB1.copy(vRel).addScaledVector(upB, -vsB);
+      const gh = vHoriz.length();
+      const slices = Math.min(Math.ceil(wdt / 0.25), 96);
+      const step = wdt / slices;
+      for (let i = 0; i < slices; i++) {
+        const m = this.mLand + this.prop;
+        const rrS = _oR.copy(this.pos).sub(this.moonC);
+        const rS = rrS.length();
+        const upS = _oUp.copy(rrS).multiplyScalar(1 / rS);
+        const aglS = rS - R_MOON;
+        if (aglS < 0.5) break; // guard handles touchdown
+        const vsS = this.vel.dot(upS);
+        const vTot = this.vel.length();
+        const vhS = _oB1.copy(this.vel).addScaledVector(upS, -vsS);
+        const ghS = vhS.length();
+        const aMax = this.THRUST_LANDER / m;
+        // suicide-burn check: stopping dv needed vs the height available
+        //   dv_h = gh, dv_v = |vs| + sqrt(2*g*agl) budget... simple ladder:
+        //   while high: burn horizontal only; below 3km or when gh small:
+        //   tilt toward vertical braking.
+        const thrust = _oV.set(0, 0, 0);
+        const gHere = this.primMu / (rS * rS);
+        if (aglS > 2000 && ghS > 20) {
+          // braking phase: priority is killing the HORIZONTAL speed
+          // (2.3 km/s needs ~270 s at full 8.6 m/s²; the fall from
+          // 120 km takes ~344 s). Vertical needs only gravity support:
+          // share up-thrust to cap sink rate, horizontal gets the rest.
+          // up share: 0 at vs>0, grows as vs sinks past -60, capped 0.5
+          const upShare = clamp((-vsS - 60) / 240, 0, 0.5);
+          const hShare = Math.sqrt(1 - upShare * upShare);
+          thrust.addScaledVector(vhS, -hShare * aMax / Math.max(ghS, 1e-6));
+          // vertical PD: target a gentle controlled sink that grows with
+          // altitude (from -12 m/s near the ground to free-fall high up)
+          // sink profile: free-fall high up (-150 m/s), braking to a
+          // gentle -8 only in the last ~2 km — holding a slow sink from
+          // orbit burns the tank just to fight gravity for minutes
+          const vsTarget = -clamp(aglS / 300, 8, 150);
+          const vsErr = vsS - vsTarget;
+          const aUp = clamp(gHere - vsErr * 0.08, 0, aMax * upShare * 1.4);
+          thrust.addScaledVector(upS, aUp);
+          thrust.setLength(Math.min(thrust.length(), aMax));
+        } else {
+          // terminal: null horizontal, control vertical toward -6 m/s
+          const wH = clamp(ghS / 30, 0, 1);
+          if (ghS > 0.5) thrust.addScaledVector(vhS, -wH * aMax / Math.max(ghS, 1e-6));
+          // same sink profile as the braking branch: free-fall high,
+          // -8 m/s only in the last ~2 km (prop is finite!)
+          const vsErr = vsS + clamp(aglS / 300, 8, 150);
+          // only UP-thrust in the terminal branch: vsErr<0 (sinking
+          // faster than target) fires the engine; above target, gravity
+          // pulls the craft back to the sink profile on its own
+          const aV = (1 - wH) * aMax * clamp(-vsErr / 10, 0, 1);
+          if (aV > 0) thrust.addScaledVector(upS, aV);
+        }
+        const tMag = thrust.length();
+        // empty tank = no engine (the burn must not run on fumes)
+        if (tMag > 1e-3 && this.prop > 0) {
+          const dm = Math.min(this.BURN_RATE * step, this.prop);
+          // thrust components are ACCELERATIONS (built from aMax = T/m),
+          // so dv = |a| * dt — the old tMag/m divided by mass twice and
+          // the descent autopilot's thrust was ~8000x too weak
+          this.vel.addScaledVector(thrust.normalize(), tMag * step);
+          this.prop = Math.max(0, this.prop - dm * (tMag / aMax));
+        }
+        this.vel.addScaledVector(upS, -this.primMu / (rS * rS) * step);
+        this.pos.addScaledVector(this.vel, step);
+      }
+      this.note = agl < 500 ? 'LANDING' : 'DESCENT';
+      } else {
+        const rail = _oRail.copy(this.pos).sub(this.primC);
+        const railV = _oRailV.copy(this.vel);
+        propagateKepler(rail, railV, this.primMu, wdt, _oNew, _oNewV);
+        this.pos.copy(this.primC).add(_oNew);
+        this.vel.copy(_oNewV);
+      }
     }
 
     // --- mission phases -------------------------------------------------
@@ -749,7 +869,11 @@ export class FlightModel {
         // (?moonangle), so absolute velocity is already moon-relative.
         const rRel = _oR.copy(this.pos).sub(this.moonC);
         const rr = rRel.length();
-        const aT = (R_MOON + 500_000 + rr) / 2;
+        // M11 ?full=1: capture straight into the descent ellipse (rp 15 km
+        // altitude, ra = entry radius) — the perilune pass then becomes the
+        // landing burn instead of a separate circularization + descent.
+        const rpT = this.fullMission ? R_MOON + 15_000 : R_MOON + 500_000;
+        const aT = (rpT + rr) / 2;
         const vTgt = Math.sqrt(MU_MOON * (2 / rr - 1 / aT));
         // prograde tangential unit vector: ĥ × r̂ with h = r × v
         const hV = _oV.copy(rRel).cross(this.vel);
@@ -760,7 +884,11 @@ export class FlightModel {
           const ve = this.THRUST_LANDER / this.BURN_RATE;
           this.prop = Math.max(0, this.prop - (this.mLand + this.prop) * (1 - Math.exp(-dv / ve)));
           this.apPhase = 'lunar-orbit';
-          this.note = 'CAPTURED';
+          this.note = this.fullMission ? 'CAPTURED-DESCENT' : 'CAPTURED';
+          if (this.fullMission) {
+            this.lastR = rr;
+            this.rTrendUp = false;
+          }
         } else {
           this.apPhase = 'soi-moon';
           this.note = 'SOI MOON';
