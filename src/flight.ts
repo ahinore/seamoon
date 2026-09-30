@@ -1087,13 +1087,15 @@ export class FlightModel {
       const vh = _oV.copy(this.vel).addScaledVector(up, -this.vel.dot(up));
       if (vh.lengthSq() > 1) {
         vh.normalize();
-        // aim near the horizon: the horizon lies sqrt(2 R h) away; aiming
-        // 85% of the way there keeps the limb in the upper frame while
-        // the approaching surface fills the lower half
+        // Aim at the SURFACE 60% of the way to the horizon (the horizon
+        // lies sqrt(2 R h) away). Projecting the point onto the sphere
+        // matters: a straight 'pos - up*k + vh*d' point floats above the
+        // curved limb and the frame fills with space instead of terrain.
         const hd = Math.sqrt(2 * this.primC.distanceTo(this.pos) * Math.max(this.tAgl, 1));
-        const lookDist = clamp(hd * 0.85, 2e3, 3e6);
-        const aheadAbs = _oB2.copy(this.pos).addScaledVector(up, -this.tAgl * 0.1)
-          .addScaledVector(vh, lookDist);
+        const lookDist = clamp(hd * 0.6, 2e3, 3e6);
+        const aheadAbs = _oB2.copy(this.pos).addScaledVector(vh, lookDist);
+        const surfaceR = this.primC.distanceTo(this.pos) - this.tAgl;
+        aheadAbs.sub(this.primC).setLength(surfaceR).add(this.primC);
         this.world.rel(aheadAbs, _oRail);
       } else {
         this.world.rel(belowAbs, _oRail);
