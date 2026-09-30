@@ -1075,8 +1075,32 @@ export class FlightModel {
     }
     this.world.rel(camAbs, this._tmp);
     this.rig.camera.position.copy(this._tmp);
+    // Look target: nadir by default, but tilt toward the prograde horizon
+    // when moving fast over the surface — during orbital flight / reentry /
+    // descent braking the view shows where the craft is going (the plasma
+    // core, the approaching terrain) instead of a static patch below.
     const belowAbs = _oB2.copy(this.pos).addScaledVector(up, -this.tAgl);
-    this.world.rel(belowAbs, _oRail);
+    const spd = this.vel.length();
+    if (spd > 300) {
+      // prograde horizon point: project the velocity direction onto the
+      // local horizontal plane, aim ~1/4 of the way to the horizon
+      const vh = _oV.copy(this.vel).addScaledVector(up, -this.vel.dot(up));
+      if (vh.lengthSq() > 1) {
+        vh.normalize();
+        // aim near the horizon: the horizon lies sqrt(2 R h) away; aiming
+        // 85% of the way there keeps the limb in the upper frame while
+        // the approaching surface fills the lower half
+        const hd = Math.sqrt(2 * this.primC.distanceTo(this.pos) * Math.max(this.tAgl, 1));
+        const lookDist = clamp(hd * 0.85, 2e3, 3e6);
+        const aheadAbs = _oB2.copy(this.pos).addScaledVector(up, -this.tAgl * 0.1)
+          .addScaledVector(vh, lookDist);
+        this.world.rel(aheadAbs, _oRail);
+      } else {
+        this.world.rel(belowAbs, _oRail);
+      }
+    } else {
+      this.world.rel(belowAbs, _oRail);
+    }
     this.rig.camera.up.copy(this.WORLD_Y);
     this.rig.camera.lookAt(_oRail);
     // near plane: altitude-tracking like the lander (0.25·AGL + floor),
