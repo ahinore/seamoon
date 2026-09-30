@@ -198,18 +198,31 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
       // and the anchor's per-cell minima become a visible 89 px dot grid
       // in vertical columns (the user's screenshot). Coarse weather
       // structure stays isotropic; only the band-forming octaves stretch.
-      float fbm3oLod(vec3 p, vec3 pU, float kmPerPx, float detail,
+      //
+      // M10.9d ANTI-FLICKER: the old OCT_BLEND keyed each octave's blend
+      // to kmPerPx (camera altitude) with an 8-px-wide fade band — during
+      // approach the 32/15 km octave mixes swept CONTINUOUSLY, and every
+      // deck-edge pixel whose coarse/fine values straddled the threshold
+      // flipped in/out frame after frame (the "snow flicker at the cloud
+      // edges" the user filmed at 1.3-1.5 Mm). Fix: key each octave to
+      // ALTITUDE with a NARROW crossfade at a fixed altitude, where the
+      // octave's cells are still 25-50 px (no speckle at the switch).
+      // Between switches the field is EXACTLY camera-independent — zero
+      // shimmer. An octave drops out where its cell would be <~20 px.
+      // camAltKm = camera altitude above the surface in km.
+      float fbm3oLod(vec3 p, vec3 pU, float camAltKm, float detail,
                      out float ampSum) {
-        // CONVERGING-OCTAVE LOD: every octave keeps FULL amplitude, but as
-        // its cell shrinks toward ~10 px on screen the octave's value
-        // converges to the NEXT-COARSER octave's value instead of fading
-        // out. Amplitude fades create a LONE-OCTAVE regime — one surviving
-        // Perlin octave paints one round blob/hole per cell (the halftone
-        // grids). Converging values keep two scales alive at every
-        // altitude. No renorm needed (ampSum stays 1.0), so threshold
-        // statistics never shift.
-        // Octave cells (km): 330 anchor, 152, 70, 32.2, 14.8 (detail-gated).
-        #define OCT_BLEND(cellKm) clamp((cellKm * 0.5 / kmPerPx - 5.0) / 8.0, 0.0, 1.0)
+        // gate: 1 = octave present. Narrow altitude crossfades (±15%).
+        //   15 km oct:  out above 400 km   (cell 43 px there)
+        //   32 km oct:  out above 1.0 Mm   (cell 66 px there)
+        //   70 km oct:  out above 3.2 Mm   (cell 60 px there)
+        //   152 km oct: out above 9.0 Mm   (cell 58 px there)
+        #define OCT_GATE(loKm, hiKm) smoothstep(hiKm, loKm, camAltKm)
+        float g0 = OCT_GATE(300.0, 420.0);   // 15 km octave
+        float g1 = OCT_GATE(700.0, 1000.0);  // 32 km octave
+        float g2 = OCT_GATE(2200.0, 3200.0); // 70 km octave
+        float g3 = OCT_GATE(6000.0, 9000.0); // 152 km octave
+        #undef OCT_GATE
         vec3 w = (gnoise3(pU * 0.461 + 7.7) * 0.45
                 + gnoise3(pU + 31.7) * 0.30) * vec3(1.0, 0.8, 1.1);
         // octave 4 (330 km) — ANCHOR: the coarsest octave is never blended
@@ -222,23 +235,23 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         float v4 = 0.5 + (gnoise3(pU * 0.2135 + 41.3)
                         + gnoise3(vec3(pU.z, pU.x, pU.y) * 0.3019 + 13.9)
                         + gnoise3(pU * 0.3630 + 77.7)) * 0.40;
-        // octave 3 (152 km): converges to octave 4 below ~10 px
-        float b3 = OCT_BLEND(152.0);
+        // octave 3 (152 km): fades out above ~6-9 Mm (converges into the
+        // 330 km anchor through the crossfade)
+        float b3 = g3;
         float v3 = mix(v4, 0.5 + gnoise3(pU * 0.461 + 7.7) * 1.2, b3);
-        // octave 2 (70 km): converges to octave 3 below 10 px
-        float b2 = OCT_BLEND(70.0);
+        // octave 2 (70 km): fades out above ~2.2-3.2 Mm
+        float b2 = g2;
         float v2 = mix(v3, 0.5 + gnoise3(p + w) * 1.2, b2);
-        // octave 1 (32 km): converges to octave 2
-        float b1 = min(OCT_BLEND(32.2), b2);
+        // octave 1 (32 km): fades out above ~0.7-1.0 Mm
+        float b1 = min(g1, b2);
         vec3 p2 = vec3(p.y, p.z, p.x);
         float v1 = mix(v2, 0.5 + gnoise3(p2 * 2.17 + w) * 1.2, b1);
-        // octave 0 (15 km): converges to octave 1, detail-gated
-        float b0 = min(OCT_BLEND(14.8), b1) * detail;
+        // octave 0 (15 km): fades out above ~300-420 km, detail-gated
+        float b0 = min(g0, b1) * detail;
         vec3 p3r = vec3(p.z, p.x, p.y);
         float v0 = mix(v1, 0.5 + gnoise3(p3r * 4.71 + w) * 1.2, b0);
         ampSum = 1.0;
         return 0.20 * v4 + 0.26 * v3 + 0.30 * v2 + 0.14 * v1 + 0.10 * v0;
-        #undef OCT_BLEND
       }
       float fbm4(vec3 p) {
         float a = 0.5, s = 0.0;
@@ -403,13 +416,10 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         float shellA = 0.0;
         if (wShell > 0.0001) {
           vec3 shellP = upF * (uPlanetR + ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)});
-          // Detail LOD for the shell: the billow cells (3/1.4/0.64 km) and
-          // the hf erosion (640 m) are SUB-PIXEL from orbit (km/px grows
-          // ~linearly with camAlt) — sampling them anyway produces regular
-          // moiré dots and, near the poles where meridians converge, the
-          // organized dot rings + seam cuts seen on orbit. Fade the 3rd
-          // octave (detail) and kill hf erosion as cells approach ~2px.
-          float kmPerPx = 2.0 * camAlt * uTanHalfFov / uViewportH / 1000.0;
+          // M10.9d: octave LOD is keyed to ALTITUDE (see fbm3oLod) — the
+          // field no longer depends on kmPerPx, so nothing re-sweeps with
+          // camera distance and the deck-edge snow cannot shimmer.
+          float camAltKm = camAlt / 1000.0;
           // FAR MAP: the near-view billow lattice (3/1.4/0.64 km cells) is
           // SUB-PIXEL from orbit (5-50 km/px) — thresholding it produces
           // organized moiré dots/rings (the "regular holes" the user saw).
@@ -436,7 +446,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                      (1.0 / 70000.0) + wind * (1.0 / 70000.0);
           vec3 pwU = shellP * (1.0 / 70000.0) + wind * (1.0 / 70000.0);
           float ampSum;
-          float f1 = fbm3oLod(pwF, pwU, kmPerPx, 1.0, ampSum);
+          float f1 = fbm3oLod(pwF, pwU, camAltKm, 1.0, ampSum);
           f1 /= max(ampSum, 0.15); // renormalize after octave fade-out
           // PERSISTENT SYSTEMS: threshold a blend of the big weather gate
           // and the fbm detail, not the fbm alone. Pure-fbm decks re-arrange
