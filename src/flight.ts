@@ -143,6 +143,8 @@ export class FlightModel {
   private readonly LOB_THRUST = 900_000;
   /** M10.8c: main parachute staged (earth entry, <9 km and subsonic). */
   private paraOpen = false;
+  /** M10.8e: entry rumble 0..1 (peak q this step; decays each frame). */
+  private shake = 0;
 
   // --- M10.8 entry telemetry (orbital mode, earth atmosphere) ---
   /** Normalized plasma/heat glow 0..1 (drives the viewport entry effect). */
@@ -655,6 +657,9 @@ export class FlightModel {
    * frozen), only the gravity well changes.
    */
   private orbitalStep(dt: number): void {
+    // M10.8e: rumble envelope decays between steps (re-armed each slice
+    // where drag is significant)
+    this.shake *= Math.exp(-dt * 3);
     // Coast time-warp: the rail is analytic, so propagation is exact at any
     // dt; warp scales the mission clock too so phase timers (TLI after one
     // parking-orbit period) fire in demo-realistic wall time.
@@ -865,6 +870,10 @@ export class FlightModel {
         // peak heat drives the glow: normalized 0..1 over ~1 MW/m^2 with
         // a slow cool-down so the plasma persists through the peak region
         this.heat = Math.max(this.heat, clamp(this.heatFlux / 1e6, 0, 1));
+        // M10.8e entry shake: peak dynamic pressure this step drives the
+        // camera rumble (writeCameraOrbital adds the offset). g/10 capped
+        // — 5 g+ reads as violent vibration.
+        this.shake = Math.max(this.shake, clamp(this.gLoad / 10, 0, 1));
       }
       this.heat = Math.max(this.heat, this.heat * Math.exp(-dt * 0.35));
       // ENTRY note: set once heat is significant, keep it until landing/impact
@@ -914,6 +923,14 @@ export class FlightModel {
     // itself sits 30 m "above" the craft along up so the HUD-style probe at
     // the frame center samples the planet, not the vehicle.
     const camAbs = _oB1.copy(this.pos).addScaledVector(up, 30);
+    // M10.8e entry rumble: offset the camera along up/right by the shake
+    // envelope (high-q vibration), plus a slow g-induced sway
+    if (this.shake > 0.003) {
+      const t = performance.now() / 1000;
+      const right = _oRail.copy(up).cross(this.WORLD_Y).normalize();
+      camAbs.addScaledVector(up, Math.sin(t * 61) * 0.6 * this.shake)
+        .addScaledVector(right, Math.sin(t * 47 + 1.3) * 0.5 * this.shake);
+    }
     this.world.rel(camAbs, this._tmp);
     this.rig.camera.position.copy(this._tmp);
     const belowAbs = _oB2.copy(this.pos).addScaledVector(up, -this.tAgl);
