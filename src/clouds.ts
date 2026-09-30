@@ -310,11 +310,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         float hLayer = clamp((length(vWorld - pc) - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
                              ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)}, 0.0, 1.0);
 
-        // M10.7: the far-view TEXTURE SHELL owns the far field, so nothing is
-        // discarded here any more. wVol still cross-fades the volumetric
-        // march out (30-90 km) while the shell fades in (45-110 km); both
-        // evaluate the same density field (see shell branch below).
-        float wVol = (1.0 - smoothstep(30000.0, 90000.0, camAlt)) * step(0.001, uVolSteps);
+        // M10.9: single-owner handoff — the near hull owns the volumetric
+        // march, the far hull owns the texture map. Their radii differ
+        // (R+2.6 km vs R+9.8 km), so any altitude band where BOTH paint
+        // shows the same cloud system twice with parallax.
+        // Single-owner handoff: the volumetric fades out by 25 km and the
+        // far map takes over there. The old 30-90 km cross-fade let BOTH
+        // hulls paint simultaneously — the far map lives at R+9.8 km and
+        // the volumetric deck at R+2.6 km, so in the overlap band the same
+        // cloud system appeared TWICE with parallax (the "second, different
+        // cloud layer below the far clouds").
+        float wVol = (1.0 - smoothstep(18000.0, 25000.0, camAlt)) * step(0.001, uVolSteps);
 
         // ---------------- weather / coverage ----------------
         vec3 upF = normalize(vWorld - pc);
