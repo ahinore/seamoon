@@ -137,6 +137,10 @@ export class FlightModel {
   private noTli = false;
   /** ?lob=1: suborbital hop (pad launch → ballistic reentry). */
   private lob = false;
+  /** ?lob=1 boost-phase clock, s (MECO at 60). */
+  private lobT = 0;
+  /** ?lob=1 booster thrust, N (TWR ~9 at ignition). */
+  private readonly LOB_THRUST = 900_000;
   /** M10.8c: main parachute staged (earth entry, <9 km and subsonic). */
   private paraOpen = false;
 
@@ -286,7 +290,9 @@ export class FlightModel {
         this.gLoad = 0;
         this.primC.set(0, 0, 0);
         this.primMu = MU;
-        this.apPhase = 'off'; // no TLI phases on a hop
+        this.apPhase = 'boost'; // pad launch: booster burns first
+        this.lobT = 0;
+        this.vel.set(0, 0, 0); // start at rest on the pad
         elementsOf(_oR.copy(this.pos), this.vel, MU, this.el);
         return;
       }
@@ -662,13 +668,35 @@ export class FlightModel {
     }
     this.orbT += wdt;
 
-    // --- coast (analytic Kepler rail, exact at any wdt) ------------------
-    // MUST run before the phase checks: on the TLI frame the last clamped
-    // slice propagates first, so the impulse fires exactly ON the spawn
-    // node. Burning before propagation would land up to one warp-step —
-    // hundreds of degrees of parking arc — short of the node, rotating the
-    // whole transfer ellipse away from the moon.
-    if (this.apPhase !== 'tli') {
+    // --- M10.8c lob boost phase (pad launch, first 60 s) -----------------
+    // A real rocket ascent instead of teleporting to 2300 m/s: 900 kN
+    // booster (TWR ~9 earth) for 60 s, pitch program vertical → 45° over
+    // the first 40 s, then the ballistic coast takes over. Numeric
+    // integration like the atmosphere block (the rail would ignore thrust).
+    if (this.lob && this.apPhase === 'boost') {
+      this.lobT += wdt;
+      const upB = _oUp.copy(this.pos).normalize();
+      const tanB = _oRail.copy(upB).cross(this.WORLD_Y).normalize();
+      // pitch: 90° (vertical) at t=0 → 45° by t=40 s, hold 45°
+      const pitch = clamp(90 - (this.lobT / 40) * 45, 45, 90);
+      const rad = pitch * Math.PI / 180;
+      const thrustDir = _oV.copy(upB).multiplyScalar(Math.sin(rad))
+        .addScaledVector(tanB, Math.cos(rad)).normalize();
+      const slices = Math.min(Math.ceil(wdt / 0.25), 96);
+      const step = wdt / slices;
+      for (let i = 0; i < slices; i++) {
+        const m = this.mLand + this.prop;
+        this.vel.addScaledVector(thrustDir, this.LOB_THRUST * step / m);
+        this.vel.addScaledVector(upB, -this.primMu / (this.pos.lengthSq()) * step);
+        this.pos.addScaledVector(this.vel, step);
+        this.prop = Math.max(0, this.prop - this.BURN_RATE * step);
+      }
+      if (this.lobT >= 60 || this.prop <= 10) {
+        this.apPhase = 'off'; // ballistic from here (atm block takes over)
+        this.note = 'MECO';
+      }
+      this.orbT -= wdt; // boost time is not coast time
+    } else if (this.apPhase !== 'tli') {
       const rail = _oRail.copy(this.pos).sub(this.primC);
       const railV = _oRailV.copy(this.vel);
       propagateKepler(rail, railV, this.primMu, wdt, _oNew, _oNewV);
@@ -773,13 +801,10 @@ export class FlightModel {
     this.heat = 0;
     // M10.8c parachute: a 10.2 t lander on a 28 m² shield alone still hits
     // at ~60 m/s. Below 9 km and subsonic (<340 m/s), stage a main chute —
-    // 650 m² / Cd 1.4 gives a survivable ~14 m/s splashdown.
+    // 650 m² / Cd 1.4 gives a survivable ~14 m/s splashdown. Staged INSIDE
+    // the slice loop (fresh altitude each 0.25 s piece) so a fast descent
+    // can't skip past the gate between frames.
     const paraA = this.paraOpen ? 650.0 : 0.0;
-    if (!this.paraOpen && this.primMu === MU
-        && alt < 9000 && this.vel.length() < 340 && this.vel.dot(up2) < 0) {
-      this.paraOpen = true;
-      this.note = 'PARACHUTE';
-    }
     if (this.primMu === MU && alt < ATMOS_TOP) {
       // Integrate the SAME warp-scaled step the rail used (wdt), sliced
       // into <=0.25 s pieces. M10.8c fix: this block previously advanced
@@ -806,6 +831,11 @@ export class FlightModel {
         // staging only apply on the way DOWN, not on the lob ascent)
         const vsS = this.vel.dot(upS);
         const descending = vsS < 0;
+        // parachute gate (fresh altitude per slice)
+        if (!this.paraOpen && descending && altS < 9000 && vS < 340) {
+          this.paraOpen = true;
+          this.note = 'PARACHUTE';
+        }
         // M10.8: once the plasma is hot the ablative heat shield deploys:
         // the bare lander hull has a small 5 m² attached area (ok for a
         // propulsive moon landing) but orbital entry needs a blunt shield —
