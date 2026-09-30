@@ -544,6 +544,26 @@ renderer.setAnimationLoop(() => {
   // to (SOI handoff reference; steers the rig's altitude/zenith). The rule
   // lives in frames.ts (M9.6) — one definition for the whole app.
   nearBody = nearestFrame(absCam);
+  // M11c lander floodlight: on the moon's night side below 60 km AGL the
+  // camera carries a warm point light that pools on the terrain ahead —
+  // the final approach is otherwise pitch black (the landing site is on
+  // the lunar far side from the sun in the TLI approach geometry).
+  {
+    const lam = moonMaterial.uniforms;
+    const onMoon = nearBody === 'moon';
+    let lampOn = 0;
+    if (onMoon) {
+      const altM = absCam.distanceTo(MOON.center) - R_MOON;
+      if (altM < 60000) {
+        _bodyUp.copy(absCam).sub(MOON.center).normalize();
+        const sunDot = _bodyUp.dot(atmoUniforms.uSunDir.value);
+        // night side: sunDot < -0.1; ramp the lamp in as sun falls away
+        lampOn = THREE.MathUtils.clamp(-sunDot * 3.0, 0, 1);
+      }
+    }
+    lam.uLampOn.value = lampOn;
+    if (lampOn > 0.001) lam.uLampPos.value.copy(absCam);
+  }
   // sea material shares the terrain's uniform objects (updated above); only
   // its own time / viewport uniforms need ticking here.
   seaMaterial.uniforms.uTime.value = performance.now() / 1000;
@@ -559,6 +579,7 @@ renderer.setAnimationLoop(() => {
     __flightExposed = true;
     (window as unknown as { __flight: unknown }).__flight = flight;
     (window as unknown as { __audio: unknown }).__audio = audio; // M10.9 probe
+    (window as unknown as { __moonmat: unknown }).__moonmat = moonMaterial; // M11c probe
   }
 
   // M10.8 reentry plasma overlay: brightness follows the flight model's

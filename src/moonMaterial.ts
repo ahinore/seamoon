@@ -16,6 +16,12 @@ export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.Shader
     uniforms: {
       uSunDir: sunDir,
       uWire: { value: 0 },
+      // M11c: lander floodlight. A camera-anchored point light for the
+      // final night-side approach: position/distance/decay follow the
+      // standard three.js point-light convention, computed on the CPU
+      // each frame (moon view only: see main.ts updateLandingLight).
+      uLampPos: { value: new THREE.Vector3(0, 0, 0) },
+      uLampOn: { value: 0 },
     },
     vertexShader: /* glsl */ `
       #include <common>
@@ -38,6 +44,8 @@ export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.Shader
     fragmentShader: /* glsl */ `
       uniform vec3 uSunDir;
       uniform float uWire;
+      uniform vec3 uLampPos;
+      uniform float uLampOn;
       varying vec3 vN;
       varying vec3 vGrid;
       varying vec3 vCol;
@@ -47,6 +55,18 @@ export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.Shader
         float ndl = clamp((dot(normalize(vN), uSunDir) + 0.12) / 1.12, 0.0, 1.0);
         // regolith is dark: albedo ~0.12, so cap diffuse well below white
         vec3 col = vCol * (0.035 + 0.965 * ndl) * 0.95;
+
+        // M11c: floodlight pool — inverse-square falloff with a soft near
+        // field and a warm white tint, only where the surface faces the lamp
+        if (uLampOn > 0.001) {
+          vec3 toLamp = uLampPos - vWorld;
+          float d2 = max(dot(toLamp, toLamp), 4.0);
+          float atten = uLampOn * 2.2e7 / d2;
+          float ndlLamp = clamp(dot(normalize(vN), normalize(toLamp)), 0.0, 1.0);
+          // soft near cut so the pool doesn't blow out right under the craft
+          float near = smoothstep(12.0, 70.0, sqrt(d2));
+          col += vec3(1.0, 0.96, 0.88) * (ndlLamp * atten * near) * vCol * 6.0;
+        }
 
         // wireframe overlay (same shader-drawn style as the terrain)
         if (uWire > 0.5) {
