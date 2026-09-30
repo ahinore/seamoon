@@ -22,14 +22,19 @@
       /* M10.8 reentry plasma: full-viewport overlay, opacity driven from JS.
          The hot core sits at the BOTTOM of the frame (velocity vector ahead
          of the craft on a nadir-facing camera). Keep the ellipse core inside
-         the viewport (~85% height) so the glow is actually visible. */
+         the viewport (~85% height) so the glow is actually visible.
+         M10.8b: punched-up alphas — with mix-blend screen over a bright
+         daylit planet the old 0.55 core washed out to a pale veil. */
       #plasma {
         position: fixed; inset: 0; z-index: 5; pointer-events: none;
         opacity: 0;
         background:
-          radial-gradient(ellipse 120% 75% at 50% 88%, rgba(255,236,180,0.95), rgba(255,130,35,0.55) 38%, rgba(190,45,12,0.22) 66%, transparent 86%),
-          radial-gradient(ellipse 140% 55% at 50% -25%, rgba(255,150,55,0.35), transparent 70%);
-        mix-blend-mode: screen;
+          radial-gradient(ellipse 110% 62% at 50% 92%, rgba(255,244,205,1), rgba(255,150,40,0.9) 30%, rgba(215,60,10,0.55) 58%, rgba(120,18,4,0.3) 78%, transparent 92%),
+          radial-gradient(ellipse 150% 48% at 50% -18%, rgba(255,140,45,0.5), transparent 72%);
+        /* M10.8b: normal blend (not screen) — screen over a bright daylit
+           planet washes the orange to pale cream; normal keeps the fire
+           visible against any background. */
+        mix-blend-mode: normal;
         transition: opacity 0.25s linear;
       }
       canvas { display: block; }

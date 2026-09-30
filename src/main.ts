@@ -193,6 +193,10 @@ if (urlParams.get('nearhull') === '0') clouds.children[0].visible = false;
 if (urlParams.get('farhull') === '0') clouds.children[1].visible = false;
 // Same-session A/B (tools/abshot.mjs): expose the group for toggling.
 if (urlParams.has('abshot')) (window as unknown as { __clouds: unknown }).__clouds = clouds;
+// Probe access for tools/reentry.mjs: the flight model (heat, note,
+// phase). Assigned after the FlightModel exists (it's declared at line
+// ~301) — registered via a lazy getter on first frame instead.
+let __flightExposed = false;
 // ?cloudbg=1: color-code which term suppresses the far deck (red = fbm
 // below threshold, green = weather gate, yellow = partial). 2 = march
 // probe for the below-deck view.
@@ -542,13 +546,22 @@ renderer.setAnimationLoop(() => {
   renderer.render(scene, rig.camera);
   hud.frame(dt);
 
+  // Probe access for tools/reentry.mjs: expose the flight model once it
+  // exists (declared below this point in module scope).
+  if (!__flightExposed) {
+    __flightExposed = true;
+    (window as unknown as { __flight: unknown }).__flight = flight;
+  }
+
   // M10.8 reentry plasma overlay: brightness follows the flight model's
   // normalized stagnation heat (orbital mode, earth atmosphere only).
   {
     const plasma = document.getElementById('plasma') as HTMLElement | null;
     if (plasma) {
       const h = flight.heat;
-      plasma.style.opacity = (0.9 * h).toFixed(3); // linear: glow tracks heat
+      // heat^0.65: the glow ramps early (a 0.3 heat = 1MW/m² already looks
+      // hot) instead of hiding behind the linear curve until the peak
+      plasma.style.opacity = (0.95 * Math.pow(h, 0.65)).toFixed(3);
     }
   }
 

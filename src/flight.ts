@@ -133,6 +133,8 @@ export class FlightModel {
   private coastWarp = 6000;
   /** Target apoapsis radius for the TLI burn, m. */
   private tliRa = 344e6;
+  /** ?notli=1: suppress the demo TLI burn (entry-testing orbits). */
+  private noTli = false;
 
   // --- M10.8 entry telemetry (orbital mode, earth atmosphere) ---
   /** Normalized plasma/heat glow 0..1 (drives the viewport entry effect). */
@@ -215,6 +217,7 @@ export class FlightModel {
       // AT apoapsis (radius R+alt) with circular speed for that radius, so
       // the craft falls toward the pe on the far side.
       this.peOverride = q.has('pe') ? num(q, 'pe', 200_000) : null;
+      this.noTli = q.has('notli');
       // Transfer apoapsis exactly at the moon's orbital radius: with the
       // moon frozen at +X the transfer ellipse ends right on the moon
       // center, so the craft plunges deep into the SOI — the boundary
@@ -254,7 +257,11 @@ export class FlightModel {
       // yields e<1e-6 circular)
       this.vel.copy(this.spawnDir).cross(this.WORLD_Y).normalize()
         .multiplyScalar(this.peOverride !== null
-          ? Math.sqrt(Math.max(MU * (2 / (R + this.spawnH) - 2 / (R + this.spawnH + this.peOverride)), 1)) // vis-viva at apoapsis, a=(ra+pe)/2
+          // pe is ALTITUDE above the surface: rp = R + pe. Vis-viva at
+          // apoapsis r=ra: v² = mu(2/ra - 1/a), a = (ra+rp)/2 →
+          // v² = mu(2/ra - 2/(ra+rp)) (M10.8: the old code used pe as a
+          // center-radius, putting perigee INSIDE the planet).
+          ? Math.sqrt(Math.max(MU * (2 / (R + this.spawnH) - 2 / (2 * R + this.spawnH + this.peOverride)), 1))
           : vc);
       this.q.identity();
       this.thr = 0;
@@ -603,7 +610,9 @@ export class FlightModel {
     let wdt = dt * this.coastWarp;
     // clamp the final coast step so TLI ignites exactly on the node (the
     // spawn point: the raise ellipse's apoapsis then faces the frozen moon)
-    if (this.apPhase === 'coast' && this.el.period > 0) {
+    // (M10.8: only when a TLI is armed — with ?notli=1 the clamp would
+    // freeze wdt at 0 every lap and the craft would never move)
+    if (this.apPhase === 'coast' && !this.noTli && this.el.period > 0) {
       wdt = Math.min(wdt, Math.max(this.el.period - this.orbT, 0));
     }
     this.orbT += wdt;
@@ -626,7 +635,10 @@ export class FlightModel {
     if (this.apPhase === 'coast') {
       // First coast: verify the rail (one lap) then ignite TLI at apoapsis
       // of the raise ellipse. For the demo we ignite after one full period.
-      if (this.orbT >= this.el.period && this.el.period > 0) {
+      // ?notli=1 (M10.8 entry testing): stay in coast forever so a low-pe
+      // orbit can dip into the atmosphere and reenter without the TLI burn
+      // hijacking the trajectory mid-test.
+      if (!this.noTli && this.orbT >= this.el.period && this.el.period > 0) {
         this.apPhase = 'tli';
         this.orbT = 0;
       }
@@ -727,8 +739,14 @@ export class FlightModel {
         if (altS >= ATMOS_TOP) break; // skipped back out (skip-up trajectory)
         const rho = isaDensity(Math.max(altS, 0));
         const vS = this.vel.length();
-        // deceleration: drag on a ~5 m^2 blunt heat-shield, Cd 1.2
-        const dragA = 1.2 * 0.5 * rho * vS * vS * 5.0 / (this.mLand + this.prop);
+        // M10.8: once the plasma is hot the ablative heat shield deploys:
+        // the bare lander hull has a small 5 m² attached area (ok for a
+        // propulsive moon landing) but orbital entry needs a blunt shield —
+        // scale to a Dragon-class 28 m² / Cd 1.5 when heating is significant.
+        const shieldA = this.heat > 0.05 ? 28.0 : 5.0;
+        const shieldCd = this.heat > 0.05 ? 1.5 : 1.2;
+        // deceleration: drag on the shield, mass = dry lander + propellant
+        const dragA = shieldCd * 0.5 * rho * vS * vS * shieldA / (this.mLand + this.prop);
         // stagnation heat flux (Sutton-Graves, k=1.7e-4, W/m^2) -> telemetry
         this.heatFlux = 1.7e-4 * Math.sqrt(rho) * vS * vS * vS;
         this.gLoad = dragA / 9.80665;
@@ -757,6 +775,11 @@ export class FlightModel {
       this.frozen = true;
       this.note = 'IMPACT';
       this.apPhase = 'off';
+      // M10.8: clear entry telemetry — otherwise the HUD shows a stale
+      // HEAT/g readout forever after touchdown.
+      this.heatFlux = 0;
+      this.gLoad = 0;
+      this.heat = 0;
     }
   }
 
