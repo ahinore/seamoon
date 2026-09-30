@@ -772,8 +772,25 @@ export class FlightModel {
         const rrS = _oR.copy(this.pos).sub(this.moonC);
         const rS = rrS.length();
         const upS = _oUp.copy(rrS).multiplyScalar(1 / rS);
-        const aglS = rS - R_MOON;
-        if (aglS < 0.5) break; // guard handles touchdown
+        const hSite = moonHeight(upS.x, upS.y, upS.z);
+        // M11e fix: aglS is SPHERE-relative; the touchdown guard tests
+        // TERRAIN-relative depth (surfR = R_MOON + hSite). On crater/
+        // basin floors (hSite < 0) the old 'aglS < 0.5 → break' left the
+        // craft hovering at terrain level forever: the rail re-engaged
+        // each frame, no thrust, no touchdown ever detected. Land on the
+        // terrain directly here instead.
+        const aglTerrain = rS - (R_MOON + hSite);
+        if (aglTerrain < 0.5) {
+          this.pos.copy(upS).multiplyScalar(R_MOON + hSite).add(this.moonC);
+          const vsTouch = this.vel.dot(upS);
+          this.vel.set(0, 0, 0);
+          this.frozen = true;
+          this.note = vsTouch > -30 ? 'LANDED' : 'CRASHED';
+          this.apPhase = 'off';
+          this.thr = 0;
+          return;
+        }
+        const aglS = rS - R_MOON; // sphere-relative AGL (vs profile keying)
         const vsS = this.vel.dot(upS);
         const vTot = this.vel.length();
         const vhS = _oB1.copy(this.vel).addScaledVector(upS, -vsS);
@@ -1086,25 +1103,30 @@ export class FlightModel {
     // core, the approaching terrain) instead of a static patch below.
     const belowAbs = _oB2.copy(this.pos).addScaledVector(up, -this.tAgl);
     const spd = this.vel.length();
-    if (spd > 300) {
-      // prograde horizon point: project the velocity direction onto the
-      // local horizontal plane, aim ~1/4 of the way to the horizon
-      const vh = _oV.copy(this.vel).addScaledVector(up, -this.vel.dot(up));
-      if (vh.lengthSq() > 1) {
-        vh.normalize();
-        // Aim at the SURFACE 60% of the way to the horizon (the horizon
-        // lies sqrt(2 R h) away). Projecting the point onto the sphere
-        // matters: a straight 'pos - up*k + vh*d' point floats above the
-        // curved limb and the frame fills with space instead of terrain.
-        const hd = Math.sqrt(2 * this.primC.distanceTo(this.pos) * Math.max(this.tAgl, 1));
-        const lookDist = clamp(hd * 0.6, 2e3, 3e6);
-        const aheadAbs = _oB2.copy(this.pos).addScaledVector(vh, lookDist);
-        const surfaceR = this.primC.distanceTo(this.pos) - this.tAgl;
-        aheadAbs.sub(this.primC).setLength(surfaceR).add(this.primC);
-        this.world.rel(aheadAbs, _oRail);
-      } else {
-        this.world.rel(belowAbs, _oRail);
-      }
+    // M11e: blend the look elevation across gs 150-450 so the descent's
+    // horizon-to-nadir transition eases instead of snapping at the 300 m/s
+    // gate while the retro thrusters are still firing.
+    const horizonBlend = clamp((spd - 150) / 300, 0, 1);
+    const vh = _oV.copy(this.vel).addScaledVector(up, -this.vel.dot(up));
+    if (horizonBlend > 0 && vh.lengthSq() > 1) {
+      vh.normalize();
+      // Aim at the SURFACE 60% of the way to the horizon (the horizon
+      // lies sqrt(2 R h) away). Projecting the point onto the sphere
+      // matters: a straight 'pos - up*k + vh*d' point floats above the
+      // curved limb and the frame fills with space instead of terrain.
+      const hd = Math.sqrt(2 * this.primC.distanceTo(this.pos) * Math.max(this.tAgl, 1));
+      const lookDist = clamp(hd * 0.6, 2e3, 3e6);
+      const aheadAbs = _oB2.copy(this.pos).addScaledVector(vh, lookDist);
+      const surfaceR = this.primC.distanceTo(this.pos) - this.tAgl;
+      aheadAbs.sub(this.primC).setLength(surfaceR).add(this.primC);
+      // blend: at low blend the target slides from the ahead-point back
+      // toward nadir along the same look ray (lerp the DIRECTION, not the
+      // points, so the elevation angle interpolates cleanly)
+      const aheadRel = _oB2.copy(aheadAbs).sub(this.pos);
+      const nadirRel = _oB3.copy(belowAbs).sub(this.pos);
+      aheadRel.lerp(nadirRel, 1 - horizonBlend);
+      aheadAbs.copy(this.pos).add(aheadRel);
+      this.world.rel(aheadAbs, _oRail);
     } else {
       this.world.rel(belowAbs, _oRail);
     }
@@ -1464,6 +1486,7 @@ const _oNew = new THREE.Vector3();
 const _oNewV = new THREE.Vector3();
 const _oB1 = new THREE.Vector3();
 const _oB2 = new THREE.Vector3();
+const _oB3 = new THREE.Vector3();
 
 const smoothstep = (e0: number, e1: number, x: number): number => {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
