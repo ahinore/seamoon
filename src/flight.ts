@@ -876,8 +876,15 @@ export class FlightModel {
         this.shake = Math.max(this.shake, clamp(this.gLoad / 10, 0, 1));
       }
       this.heat = Math.max(this.heat, this.heat * Math.exp(-dt * 0.35));
-      // ENTRY note: set once heat is significant, keep it until landing/impact
-      if (this.heat > 0.03 && (this.apPhase === 'lunar-orbit' || this.apPhase === 'trans-lunar' || this.apPhase === 'soi-moon')) {
+      // stale telemetry guard: leaving the atmosphere must zero the
+      // per-slice readouts (they were frozen at the last slice's values)
+      if (this.heat < 0.01) {
+        this.heatFlux = 0;
+        this.gLoad = 0;
+      }
+      // ENTRY note: set once heat is significant, keep it until landing/
+      // impact (any phase — the lob runs apPhase 'off' after MECO)
+      if (this.heat > 0.03) {
         this.note = 'ENTRY';
       }
       this.tGs = this.vel.length();
