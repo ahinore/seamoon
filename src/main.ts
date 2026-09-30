@@ -222,7 +222,7 @@ const moonView = new PlanetView(scene, R_MOON, moonMaterial, {
   tauPx: 2,
   res: 65,
   cacheSize: 300,
-}, MOON_BODY);
+  }, MOON_BODY);
 if (urlParams.get('moon') === '0') moonView.root.visible = false;
 // sim clock for the orbit (performance.now-based; deterministic per session)
 const t0Sim = performance.now() / 1000;

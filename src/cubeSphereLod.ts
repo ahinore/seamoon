@@ -118,6 +118,14 @@ export class PlanetView {
   private readonly frustum = new THREE.Frustum();
   private readonly sphere = new THREE.Sphere();
   private readonly projScreen = new THREE.Matrix4();
+  // M11c manual frustum basis
+  private readonly _fwd = new THREE.Vector3();
+  private readonly _right = new THREE.Vector3();
+  private readonly _upv = new THREE.Vector3();
+  private _tanV = 1;
+  private _tanH = 1;
+  private _near = 0.1;
+  private _far = 1e9;
   // ---- M10.1: async worker pool + motion-lookahead priority ----
   private readonly pool = new TilePool({ maxInFlight: 4 });
   /** ?noworker=1 forces the old synchronous path (A/B diagnosis). */
@@ -243,11 +251,20 @@ export class PlanetView {
   update(camera: THREE.PerspectiveCamera, origin: THREE.Vector3, viewportHeightPx: number): void {
     camera.updateMatrixWorld();
     this.originV.copy(origin);
-    this.projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    this.frustum.setFromProjectionMatrix(this.projScreen);
-    // Absolute camera position for LOD distance decisions.
+    // M11c: manual frustum. setFromProjectionMatrix went degenerate at the
+    // extreme far/near the lunar views need (near ~3.7 km, far 2e9): the
+    // extracted side planes ended up ~2e9 off and culled ON-SCREEN tiles
+    // (the lunar surface rasterized ~1% coverage). Basis-vector sphere
+    // tests are numerically identical math without the matrix extraction.
     this.camPos.copy(origin).add(camera.position);
-    this.pxPerUnit = (viewportHeightPx * 0.5) / Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5);
+    camera.getWorldDirection(this._fwd);
+    this._right.crossVectors(this._fwd, camera.up).normalize();
+    this._upv.crossVectors(this._right, this._fwd).normalize();
+    this._tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5);
+    this._tanH = this._tanV * camera.aspect;
+    this._near = camera.near;
+    this._far = camera.far;
+    this.pxPerUnit = (viewportHeightPx * 0.5) / this._tanV;
 
     this.processQueue();
 
@@ -289,9 +306,26 @@ export class PlanetView {
     const cz = node.center.z + this.bodyCenter.z - this.originV.z;
     this.sphere.center.set(cx, cy, cz);
     this.sphere.radius = node.boundRadius;
-    if (!this.frustum.intersectsSphere(this.sphere)) {
-      this.hideSubtree(node);
-      return;
+    // M11c: basis-vector sphere-vs-frustum (replaces the degenerate
+    // matrix-extracted frustum; see the comment in update()).
+    {
+      const ex = this.sphere.center.x - this.camPos.x;
+      const ey = this.sphere.center.y - this.camPos.y;
+      const ez = this.sphere.center.z - this.camPos.z;
+      const z = ex * this._fwd.x + ey * this._fwd.y + ez * this._fwd.z;
+      const r = this.sphere.radius;
+      let culled = z + r < this._near || z - r > this._far;
+      if (!culled) {
+        const x = ex * this._right.x + ey * this._right.y + ez * this._right.z;
+        const y = ex * this._upv.x + ey * this._upv.y + ez * this._upv.z;
+        culled = Math.abs(x) - r > z * this._tanH || Math.abs(y) - r > z * this._tanV;
+      }
+      if (culled) {
+        if ((this.o as { noFrustumCull?: boolean }).noFrustumCull !== true) {
+          this.hideSubtree(node);
+          return;
+        }
+      }
     }
 
     // Distance to the spherical patch. Near-nadir, the camera height along the
