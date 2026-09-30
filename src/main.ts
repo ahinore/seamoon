@@ -187,6 +187,12 @@ cloudUniforms.uSunDir = atmoUniforms.uSunDir; // share the sun object
 const clouds = makeCloudMesh(R, cloudUniforms);
 scene.add(clouds);
 if (urlParams.get('clouds') === '0') clouds.visible = false;
+// A/B for the dual-hull work: hide one hull at a time (?nearhull=0 /
+// ?farhull=0). clouds.children = [nearMesh, farMesh].
+if (urlParams.get('nearhull') === '0') clouds.children[0].visible = false;
+if (urlParams.get('farhull') === '0') clouds.children[1].visible = false;
+// Same-session A/B (tools/abshot.mjs): expose the group for toggling.
+if (urlParams.has('abshot')) (window as unknown as { __clouds: unknown }).__clouds = clouds;
 // ?cloudbg=1: color-code which term suppresses the far deck (red = fbm
 // below threshold, green = weather gate, yellow = partial). 2 = march
 // probe for the below-deck view.

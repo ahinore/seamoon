@@ -517,9 +517,23 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           vec2 tT = raySphere(ro, rd, rT);
           float t0, t1;
           if (camAlt < ${CLOUD_BOTTOM.toFixed(1)}) {
-            // below the slab: enter at bottom-sphere far hit, exit at top far hit
-            t0 = max(tB.y, 0.0);
-            t1 = tT.y;
+            // below the slab: enter at bottom-sphere far hit, exit at top far hit.
+            // HORIZON REJECTION: the near hull has depthTest off (mountains
+            // must not erase the deck), so downward rays whose sight line
+            // strikes the ground BEFORE the slab would paint cloud onto the
+            // terrain (the "cloud texture on the ground" artifact). Such
+            // rays dip inside the planet: reject them by closest approach
+            // (perigee = |ro × rd|) < surface radius + margin.
+            float perigee = length(cross(ro, rd));
+            // ...and only if that closest approach lies AHEAD of the camera
+            // (t = -dot(ro,rd) > 0). For up-looking rays the line's perigee
+            // is behind the camera — the ray climbs away and never dips.
+            if (-dot(ro, rd) > 0.0 && perigee < uPlanetR + camAlt + 300.0) {
+              t0 = 1.0; t1 = 0.0; // no march
+            } else {
+              t0 = max(tB.y, 0.0);
+              t1 = tT.y;
+            }
           } else if (camAlt > ${CLOUD_TOP.toFixed(1)}) {
             // above: enter at top near hit, exit at bottom near hit
             t0 = max(tT.x, 0.0);
