@@ -367,6 +367,13 @@ export class PlanetView {
 
     // All 4 children ready -> render children instead of this tile.
     node.tile!.mesh.visible = false;
+    // M11h: detach the hidden interior tile's MESH from the scene graph.
+    // The tile object (and geometry) stays for a cheap re-show, but a
+    // detached mesh is skipped by the renderer's per-frame scene walk —
+    // a long mission otherwise accumulates ~2400 live-but-invisible
+    // nodes under the view root (the gradual slowdown).
+    const hidden = node.tile!.mesh;
+    if (hidden.parent) hidden.removeFromParent();
     for (const c of node.children!) this.visit(c);
   }
 
@@ -432,13 +439,19 @@ export class PlanetView {
     );
     t.mesh.updateMatrix();
     t.mesh.visible = true;
+    // M11h: re-attach if the mesh was detached while hidden (see visit())
+    if (!t.mesh.parent) this.root.add(t.mesh);
     this.stats.visibleTiles++;
     this.stats.triangles += t.triangles;
     if (node.level > this.stats.maxVisibleLevel) this.stats.maxVisibleLevel = node.level;
   }
 
   private hideSubtree(node: QNode): void {
-    if (node.tile) node.tile.mesh.visible = false;
+    if (node.tile) {
+      node.tile.mesh.visible = false;
+      // M11h: fully out of view — detach from the scene graph as well
+      if (node.tile.mesh.parent) node.tile.mesh.removeFromParent();
+    }
     if (node.children) for (const c of node.children) this.hideSubtree(c);
   }
 

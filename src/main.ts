@@ -338,6 +338,8 @@ document.addEventListener('pointerdown', () => audio.resume());
 
 // Demo-only pixel probe: samples rendered colors so automated verification can
 // confirm actual pixels (e.g. planet lit vs. sky), not just stats. null = off.
+// M11h: readPixels stalls the GPU pipeline — throttle to 10 Hz (probe
+// consumers poll the HUD text; sub-100 ms latency is plenty).
 type ProbeFn = () => string;
 let probe: ProbeFn | null = null;
 {
@@ -351,6 +353,8 @@ let probe: ProbeFn | null = null;
     let prevRow: Uint8Array | null = null;
     let prevW = 0;
     let prevH = 0;
+    let lastProbe = 0;
+    let cached = '';
     const sample = (px: number, py: number): [number, number, number] => {
       gl.readPixels(px, py, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
       return [buf[0], buf[1], buf[2]];
@@ -360,6 +364,11 @@ let probe: ProbeFn | null = null;
     const cssW = () => renderer.domElement.clientWidth;
     const cssH = () => renderer.domElement.clientHeight;
     probe = () => {
+      // M11h: serve the cached readout at >10 Hz — readPixels is a
+      // synchronous GPU stall, and the probe runs every frame otherwise
+      const now = performance.now();
+      if (now - lastProbe < 100 && cached) return cached;
+      lastProbe = now;
       const W = w(), H = h();
       let pts: [number, number][];
       if (preset === 'd') {
@@ -456,7 +465,8 @@ let probe: ProbeFn | null = null;
         prevH = H;
         return `j changed=${d}/${n} rebases=${world.rebaseCount}`;
       }
-      return `${show} dpr=${dpr} ${cssW()}x${cssH()}`;
+      cached = `${show} dpr=${dpr} ${cssW()}x${cssH()}`;
+      return cached;
     };
   }
 }
@@ -583,6 +593,10 @@ renderer.setAnimationLoop(() => {
     (window as unknown as { __moonmat: unknown }).__moonmat = moonMaterial; // M11c probe
     (window as unknown as { __moonview: unknown }).__moonview = moonView; // M11c probe
     (window as unknown as { __world: unknown }).__world = world; // M11c probe
+    // M11h perf probes: scene traversal + renderer memory counters
+    (window as unknown as { __scene: unknown }).__scene = scene;
+    (window as unknown as { __renderer: unknown }).__renderer = renderer;
+    (window as unknown as { __views: unknown }).__views = { planet, sea, moonView };
   }
 
   // M10.8 reentry plasma overlay: brightness follows the flight model's

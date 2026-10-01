@@ -89,6 +89,11 @@ export class TileMesh {
   }
 
   dispose(): void {
+    // M11h: the mesh must LEAVE THE SCENE GRAPH too — disposing only the
+    // geometry left every evicted tile as a live node under the view root,
+    // and a long mission accumulated ~2400 dead meshes that the renderer
+    // still traversed every frame (the "gradual slowdown").
+    this.mesh.removeFromParent();
     this.mesh.geometry.dispose();
   }
 }
