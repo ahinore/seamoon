@@ -148,6 +148,15 @@ export class FlightModel {
   private readonly LOB_THRUST = 900_000;
   /** M10.8c: main parachute staged (earth entry, <9 km and subsonic). */
   private paraOpen = false;
+  /** M11i: drogue chute staged first (fast/high, small canopy). */
+  private drogueOpen = false;
+  /** M11i: canopy inflation progress 0..1 — chutes fill over ~1-2 s in
+   * reality; ramping the area spreads the opening shock (a full 650 m²
+   * main snapping open in one slice spiked the accelerometer to ~435 g). */
+  private drogueT = 0;
+  private paraT = 0;
+  /** M11i: staging-event counter (audio crack hook; public one-shot). */
+  chuteEvents = 0;
   /** M10.8e: entry rumble 0..1 (peak q this step; decays each frame). */
   private shake = 0;
   /** M10.9: last slice's air density (kg/m^3) for the audio wind layer. */
@@ -325,6 +334,10 @@ export class FlightModel {
         this.prop = 6000;
         this.inMoonSoi = false;
         this.paraOpen = false;
+        this.drogueOpen = false; // M11i
+        this.drogueT = 0;
+        this.paraT = 0;
+        this.chuteEvents = 0;
         this.heat = 0;
         this.heatFlux = 0;
         this.gLoad = 0;
@@ -358,6 +371,10 @@ export class FlightModel {
       this.prop = this.fullMission ? 14000 : 6000;
       this.inMoonSoi = false;
       this.paraOpen = false;
+      this.drogueOpen = false; // M11i
+      this.drogueT = 0;
+      this.paraT = 0;
+      this.chuteEvents = 0;
       this.heat = 0;
       this.heatFlux = 0;
       this.gLoad = 0;
@@ -1059,11 +1076,13 @@ export class FlightModel {
     // rail inside the atmosphere (small slices keep the v^3 heating and the
     // drag honest at 100x warp); outside it the rail stays exact.
     this.heat = 0;
-    // M10.8c parachute: a 10.2 t lander on a 28 m² shield alone still hits
-    // at ~60 m/s. Below 9 km and subsonic (<340 m/s), stage a main chute —
-    // 650 m² / Cd 1.4 gives a survivable ~14 m/s splashdown. Staged INSIDE
-    // the slice loop (fresh altitude each 0.25 s piece) so a fast descent
-    // can't skip past the gate between frames.
+    // M10.8c parachute → M11i staged chutes: a 10.2 t lander on a 28 m²
+    // shield alone still hits at ~60 m/s. Drogue first (small 35 m² canopy,
+    // works at transonic speeds), then the 650 m² main below 7 km and
+    // ~200 m/s — survivable ~14 m/s splashdown. Staged INSIDE the slice
+    // loop (fresh altitude each 0.25 s piece) so a fast descent can't skip
+    // past the gate between frames. Canopies inflate over ~1-2 s (ramped
+    // area): a full main snapping open in one slice spiked peakG to ~435 g.
     const paraA = this.paraOpen ? 650.0 : 0.0;
     if (this.primMu === MU && alt < ATMOS_TOP) {
       // Integrate the SAME warp-scaled step the rail used (wdt), sliced
@@ -1092,19 +1111,34 @@ export class FlightModel {
         // staging only apply on the way DOWN, not on the lob ascent)
         const vsS = this.vel.dot(upS);
         const descending = vsS < 0;
-        // parachute gate (fresh altitude per slice)
-        if (!this.paraOpen && descending && altS < 9000 && vS < 340) {
+        // M11i staged chute gates (fresh altitude per slice):
+        // drogue below 14 km / 700 m/s, main below 7 km / 200 m/s
+        if (!this.drogueOpen && descending && altS < 14000 && vS < 700) {
+          this.drogueOpen = true;
+          this.drogueT = 0;
+          this.chuteEvents++;
+          this.note = 'DROGUE';
+        }
+        if (this.drogueOpen && !this.paraOpen && descending && altS < 7000 && vS < 200) {
           this.paraOpen = true;
+          this.paraT = 0;
+          this.chuteEvents++;
           this.note = 'PARACHUTE';
         }
+        // canopy inflation ramps (drogue 1.2 s, main 1.8 s)
+        if (this.drogueOpen && this.drogueT < 1) this.drogueT = Math.min(1, this.drogueT + step / 1.2);
+        if (this.paraOpen && this.paraT < 1) this.paraT = Math.min(1, this.paraT + step / 1.8);
         // M10.8: once the plasma is hot the ablative heat shield deploys:
         // the bare lander hull has a small 5 m² attached area (ok for a
         // propulsive moon landing) but orbital entry needs a blunt shield —
         // scale to a Dragon-class 28 m² / Cd 1.5 when heating is significant.
         const shieldA = this.heat > 0.05 && descending ? 28.0 : 5.0;
         const shieldCd = this.heat > 0.05 && descending ? 1.5 : 1.2;
-        // deceleration: drag on the shield + staged main chute (Cd*A sums)
-        const dragA = (shieldCd * shieldA + (this.paraOpen && descending ? 1.4 * paraA : 0))
+        // deceleration: drag on the shield + staged chutes (Cd*A sums);
+        // chute areas scale with their inflation ramps
+        const drogueA = this.drogueOpen ? 35.0 * this.drogueT : 0.0;
+        const chuteA = paraA * this.paraT;
+        const dragA = (shieldCd * shieldA + (descending ? 1.4 * (drogueA + chuteA) : 0))
           * 0.5 * rho * vS * vS / (this.mLand + this.prop);
         // stagnation heat flux (Sutton-Graves, k=1.7e-4, W/m^2) -> telemetry
         this.heatFlux = descending ? 1.7e-4 * Math.sqrt(rho) * vS * vS * vS : 0;
@@ -1164,6 +1198,7 @@ export class FlightModel {
       const vsTouch = this.vel.dot(up2b);
       this.vel.set(0, 0, 0);
       this.paraOpen = false;
+      this.drogueOpen = false; // M11i
       this.frozen = true;
       // touchdown classification: chute terminal ~20 m/s lands intact,
       // anything faster is a crash
@@ -1554,13 +1589,17 @@ export class FlightModel {
       const entry = this.heatFlux > 1e4
         ? `  HEAT ${(this.heatFlux / 1e6).toFixed(2)}MW/m2  ${this.gLoad.toFixed(1)}g`
         : '';
+      // M11i: chute state readout (canopy inflation % when staged)
+      const chutes = this.drogueOpen
+        ? `  CH (D${Math.round(this.drogueT * 100)}%${this.paraOpen ? ` M${Math.round(this.paraT * 100)}%` : ''})`
+        : '';
       return (
         `ORBIT(${body}) GS ${s.gs.toFixed(0)} m/s  ALT ${fmtM(s.agl)}  ` +
         `a ${fmtM(el.a)}  e ${el.e.toFixed(4)}  ` +
         `Pe ${fmtM(el.rp - (body === 'E' ? R : R_MOON))}  Ap ${apo}  ` +
         `T ${el.period > 0 ? (el.period / 60).toFixed(1) + 'min' : '--'}  ` +
         `PROP ${this.prop.toFixed(0)}kg  [${s.phase}${s.note ? ' ' + s.note : ''}]` +
-        entry
+        chutes + entry
       );
     }
     return (

@@ -485,40 +485,47 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min((now - last) / 1000, 0.25);
   last = now;
 
-  let autoLine: string | null = null;
-  let rebased = 0;
-  for (let i = 0; i < speedup; i++) {
-    // Keep the absolute camera position in sync with the frame-relative one
-    // (the rig moves the camera; the autopilot may also teleport it).
+let autoLine: string | null = null;
+let rebased = 0;
+// M11i: chute staging → one-shot audio crack (chuteCrack was wired nowhere)
+let lastChuteEvents = 0;
+for (let i = 0; i < speedup; i++) {
+  // Keep the absolute camera position in sync with the frame-relative one
+  // (the rig moves the camera; the autopilot may also teleport it).
+  world.abs(rig.camera.position, absCam);
+
+  if (rig.stickMode) {
+    rig.update(dt);
+    flight.step(dt);
     world.abs(rig.camera.position, absCam);
-
-    if (rig.stickMode) {
-      rig.update(dt);
-      flight.step(dt);
-      world.abs(rig.camera.position, absCam);
-      // M10.9 audio: booster on during the lob boost phase
-      updateFlightAudio(audio, flight, flight.boostPhase);
-    } else {
-      rig.update(dt);
-      autoLine = auto.update(rig, dt);
-      world.abs(rig.camera.position, absCam);
+    // M10.9 audio: booster on during the lob boost phase
+    updateFlightAudio(audio, flight, flight.boostPhase);
+    // M11i: chute crack on each staging event (drogue, main)
+    if (flight.chuteEvents !== lastChuteEvents) {
+      lastChuteEvents = flight.chuteEvents;
+      audio.chuteCrack();
     }
-
-    // Floating-origin rebase: recenters the frame origin onto the camera.
-    // Only frame-relative values shift; absolute bookkeeping is untouched.
-    const shift = world.rebase(rig.camera.position, ORIGIN_REBASE_M);
-    if (shift) {
-      rebased++;
-      planet.forceReposition(world.origin);
-      sea.forceReposition(world.origin);
-      moonView.forceReposition(world.origin); // M11c: the moon tiles went stale too
-    }
-
-    planet.update(rig.camera, world.origin, window.innerHeight);
-    sea.update(rig.camera, world.origin, window.innerHeight);
-    // Moon: place tiles at center + bodyCenter - origin (all double).
-    moonView.update(rig.camera, world.origin, window.innerHeight);
+  } else {
+    rig.update(dt);
+    autoLine = auto.update(rig, dt);
+    world.abs(rig.camera.position, absCam);
   }
+
+  // Floating-origin rebase: recenters the frame origin onto the camera.
+  // Only frame-relative values shift; absolute bookkeeping is untouched.
+  const shift = world.rebase(rig.camera.position, ORIGIN_REBASE_M);
+  if (shift) {
+    rebased++;
+    planet.forceReposition(world.origin);
+    sea.forceReposition(world.origin);
+    moonView.forceReposition(world.origin); // M11c: the moon tiles went stale too
+  }
+
+  planet.update(rig.camera, world.origin, window.innerHeight);
+  sea.update(rig.camera, world.origin, window.innerHeight);
+  // Moon: place tiles at center + bodyCenter - origin (all double).
+  moonView.update(rig.camera, world.origin, window.innerHeight);
+}
   // Keep distant scenery centered on the camera (stars are only directions —
   // recenter them each frame so they never sit behind the far plane).
   stars.position.copy(rig.camera.position);
