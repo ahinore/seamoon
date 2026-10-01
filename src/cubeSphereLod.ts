@@ -39,6 +39,12 @@ export interface PlanetOptions {
    * seaLevel radius; coarser settings are fine (no terrain displacement).
    */
   seaMode?: boolean;
+  /** M11m A/B: disable the side-plane cull clause (mis-cull diagnosis). */
+  noCullSide?: boolean;
+  /** M11m A/B: disable the near/far cull clause. */
+  noCullNear?: boolean;
+  /** M11m debug: record near culled nodes' test inputs in stats.cullDbg. */
+  cullDbg?: boolean;
 }
 
 export interface LodStats {
@@ -54,6 +60,8 @@ export interface LodStats {
   workerBuilt: number;
   /** M11j debug: visible tile count per level (index = level). */
   perLevel?: number[];
+  /** M11m debug: test inputs of near culled nodes (cullDbg mode). */
+  cullDbg?: { lvl: number; r: number; z: number; x: number; y: number; d: number; tanH: number; tanV: number; near: number; far: number }[];
 }
 
 interface QNode {
@@ -130,6 +138,8 @@ export class PlanetView {
   private _tanH = 1;
   private _near = 0.1;
   private _far = 1e9;
+  /** M11m: camera position in FRAME-RELATIVE space (frustum test only). */
+  private _camRel = new THREE.Vector3();
   // ---- M10.1: async worker pool + motion-lookahead priority ----
   private readonly pool = new TilePool({ maxInFlight: 4 });
   /** ?noworker=1 forces the old synchronous path (A/B diagnosis). */
@@ -261,6 +271,17 @@ export class PlanetView {
     // (the lunar surface rasterized ~1% coverage). Basis-vector sphere
     // tests are numerically identical math without the matrix extraction.
     this.camPos.copy(origin).add(camera.position);
+    // M11m CRITICAL FIX: the frustum test below mixed coordinate frames.
+    // sphere.center is FRAME-RELATIVE (node.center + bodyCenter - originV)
+    // but camPos was ABSOLUTE (origin + camera.position) — after the first
+    // origin rebase (|origin| ~ Mm) the difference is wrong by |origin|,
+    // so near tiles computed as being millions of meters off-axis and were
+    // culled + detached: "the foreground disappears when I look at the
+    // horizon" (worst at grazing pitches, invisible when origin==0).
+    // The test now uses the camera's frame-relative position, matching
+    // the comment's own intent; camPos stays ABSOLUTE for the distance
+    // estimates (absolute tile centers) further down.
+    this._camRel.copy(camera.position);
     camera.getWorldDirection(this._fwd);
     this._right.crossVectors(this._fwd, camera.up).normalize();
     this._upv.crossVectors(this._right, this._fwd).normalize();
@@ -276,6 +297,7 @@ export class PlanetView {
     this.stats.triangles = 0;
     this.stats.maxVisibleLevel = 0;
     this.stats.perLevel = new Array(21).fill(0);
+    (this.stats as { cullDbg?: unknown[] }).cullDbg = (this.o as { cullDbg?: boolean }).cullDbg ? [] : undefined;
     for (const r of this.roots) this.visit(r);
 
     this.stats.pending = this.queue.length + this.pool.pending;
@@ -314,18 +336,37 @@ export class PlanetView {
     // M11c: basis-vector sphere-vs-frustum (replaces the degenerate
     // matrix-extracted frustum; see the comment in update()).
     {
-      const ex = this.sphere.center.x - this.camPos.x;
-      const ey = this.sphere.center.y - this.camPos.y;
-      const ez = this.sphere.center.z - this.camPos.z;
+      // M11m: _camRel is FRAME-RELATIVE like sphere.center — see update().
+      const ex = this.sphere.center.x - this._camRel.x;
+      const ey = this.sphere.center.y - this._camRel.y;
+      const ez = this.sphere.center.z - this._camRel.z;
       const z = ex * this._fwd.x + ey * this._fwd.y + ez * this._fwd.z;
       const r = this.sphere.radius;
-      let culled = z + r < this._near || z - r > this._far;
-      if (!culled) {
+      // M11m: clause-level A/B switches for the culling-eats-near-tiles bug
+      // (?nocullside=1 / ?nocullnear=1) — bisects which test mis-culls.
+      const oc = this.o as { noCullSide?: boolean; noCullNear?: boolean };
+      let culled = false;
+      if (oc.noCullNear !== true) culled = z + r < this._near || z - r > this._far;
+      if (!culled && oc.noCullSide !== true) {
         const x = ex * this._right.x + ey * this._right.y + ez * this._right.z;
         const y = ex * this._upv.x + ey * this._upv.y + ez * this._upv.z;
         culled = Math.abs(x) - r > z * this._tanH || Math.abs(y) - r > z * this._tanV;
       }
       if (culled) {
+        // M11m: optional dump of mis-cull suspects (cullDbg=1): records the
+        // first N culled nodes per update with their test inputs. NEAR only
+        // (< 1500 km) — far-side tiles are legitimately culled.
+        if ((this.o as { cullDbg?: boolean }).cullDbg && this.stats.cullDbg && this.stats.cullDbg.length < 24 && this.sphere.center.distanceTo(this.camPos) < 8e6) {
+          const x = ex * this._right.x + ey * this._right.y + ez * this._right.z;
+          const y = ex * this._upv.x + ey * this._upv.y + ez * this._upv.z;
+          this.stats.cullDbg.push({
+            lvl: node.level, r: +r.toPrecision(4),
+            z: +z.toPrecision(4), x: +x.toPrecision(4), y: +y.toPrecision(4),
+            d: +this.sphere.center.distanceTo(this.camPos).toPrecision(5),
+            tanH: +this._tanH.toPrecision(3), tanV: +this._tanV.toPrecision(3),
+            near: this._near, far: this._far,
+          });
+        }
         if ((this.o as { noFrustumCull?: boolean }).noFrustumCull !== true) {
           this.hideSubtree(node);
           return;
