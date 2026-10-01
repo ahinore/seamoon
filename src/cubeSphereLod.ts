@@ -111,6 +111,8 @@ export class PlanetView {
   private readonly roots: QNode[] = [];
   private readonly cache = new Map<string, TileMesh>();
   private readonly queue: QNode[] = [];
+  // M11h: worker results waiting to be attached (bounded application rate)
+  private readonly staged: { node: QNode; tile: TileMesh }[] = [];
   private readonly camPos = new THREE.Vector3();
   private readonly originV = new THREE.Vector3();
   private readonly _absC = new THREE.Vector3();
@@ -514,7 +516,23 @@ export class PlanetView {
   }
 
   private processQueue(): void {
-    if (this.queue.length === 0) return;
+    // M11h: drain staged worker results first, a bounded batch per frame so
+    // a burst of finished tiles never uploads all its buffers in one render
+    if (this.staged.length > 0) {
+      const budget = Math.min(this.staged.length, 6);
+      for (let i = 0; i < budget; i++) {
+        const { node, tile } = this.staged.shift()!;
+        if (node.dead || node.tile) {
+          this.cachePutStale(node, tile);
+          continue;
+        }
+        node.tile = tile;
+        this.root.add(tile.mesh);
+        this.stats.built++;
+        this.stats.workerBuilt++;
+      }
+    }
+    if (this.queue.length === 0 && this.staged.length === 0) return;
     // Priority sort (M10.1): nearest-first, biased by camera MOTION — tiles
     // ahead of the flight direction are pulled forward so forward flight
     // rarely waits on geometry that split mid-frame. The velocity estimate is
@@ -546,10 +564,12 @@ export class PlanetView {
               this.cachePutStale(node, tile);
               return;
             }
-            node.tile = tile;
-            this.root.add(tile.mesh);
-            this.stats.built++;
-            this.stats.workerBuilt++;
+            // M11h: apply worker results in bounded batches. When a burst of
+            // tiles resolves on the same frame (descent start: 1400 queued),
+            // attaching them all at once makes the renderer upload every new
+            // buffer in one draw call pass — the 150 ms hitch. Stage them;
+            // processQueue drains the staging list a few per frame.
+            this.staged.push({ node, tile });
           },
         );
       }
