@@ -489,6 +489,8 @@ let autoLine: string | null = null;
 let rebased = 0;
 // M11i: chute staging → one-shot audio crack (chuteCrack was wired nowhere)
 let lastChuteEvents = 0;
+// M11j: moonshot stage-separation events
+let lastMsStageEvents = 0;
 for (let i = 0; i < speedup; i++) {
   // Keep the absolute camera position in sync with the frame-relative one
   // (the rig moves the camera; the autopilot may also teleport it).
@@ -503,6 +505,11 @@ for (let i = 0; i < speedup; i++) {
     // M11i: chute crack on each staging event (drogue, main)
     if (flight.chuteEvents !== lastChuteEvents) {
       lastChuteEvents = flight.chuteEvents;
+      audio.chuteCrack();
+    }
+    // M11j: moonshot stage separation uses the same percussive crack
+    if (flight.msStageEvents !== lastMsStageEvents) {
+      lastMsStageEvents = flight.msStageEvents;
       audio.chuteCrack();
     }
   } else {
@@ -551,8 +558,14 @@ for (let i = 0; i < speedup; i++) {
   // (M9.6: the registry entry is the single source of truth — PlanetView,
   // flight physics and the nearest-body rule all read this one vector).
   // ?moonangle=<deg> (test hook) freezes the orbit at a fixed angle.
+  // M11j: the moonshot demo OWNS the moon's position (placed at the TLI
+  // antipode by the flight model at spawn) — the live clock must not
+  // overwrite it or the transfer misses the moon by the drift.
   if (auto.moonAngle !== null) {
     moonPositionAtAngle(auto.moonAngle, MOON.center);
+  } else if (flight.moonshotActive) {
+    // keep MOON.center = flight.moonC (the demo's frozen placement)
+    MOON.center.copy(flight.moonCenter);
   } else {
     moonPosition(performance.now() / 1000 - t0Sim, MOON.center);
   }

@@ -13,7 +13,10 @@ import * as THREE from 'three';
  */
 export const MOON_ORBIT_R = 384.4e6; // m, semi-major axis (circular approx)
 const MOON_PERIOD_S = 27.32 * 24 * 3600; // sidereal month
-const INCLINATION = 5.14 * (Math.PI / 180);
+/** Orbit plane tilt from the XZ plane, rad (M11j: the moonshot ascent
+ * programs its pitch program INTO this plane so the TLI geometry and the
+ * dynamically-placed moon stay exactly coplanar). */
+export const INCLINATION = 5.14 * (Math.PI / 180);
 
 /** Angular rate of the circular orbit, rad/s. */
 const ANG_RATE = (Math.PI * 2) / MOON_PERIOD_S;

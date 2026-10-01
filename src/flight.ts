@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { terrainHeight } from './terrain';
 import { ATMOSPHERE_TOP as ATMOS_TOP } from './atmosphere';
 import { moonHeight } from './moon';
-import { moonCenterFromParams, MOON_ORBIT_R } from './moonOrbit';
+import { moonCenterFromParams, moonPositionAtAngle, MOON_ORBIT_R, INCLINATION } from './moonOrbit';
 import { propagateKepler, elementsOf, SOI_MOON, type OrbitalElements } from './orbit';
 import { EARTH, MOON, nearestFrame, localToAbsolute, eastAt } from './frames';
 import type { CameraRig } from './cameraRig';
@@ -139,6 +139,29 @@ export class FlightModel {
   private lob = false;
   /** ?full=1: TLI → 15km-perilune capture → powered descent → landing. */
   private fullMission = false;
+  /** M11j ?moonshot=1: pad → ascent → orbit → TLI → descent, the whole
+   * outbound half of a moon landing in one scripted demo (~5 min).
+   * Implies the fullMission capture/descent path. */
+  private moonshot = false;
+  /** M11j moonshot ascent stage: 1 = booster (LOX/Kero), 2 = upper stage. */
+  private msStage = 0;
+  /** M11j moonshot ascent clock (stage-local), s. */
+  private msT = 0;
+  /** M11j moonshot staging-event counter for the audio crack. */
+  msStageEvents = 0;
+  /** M11j: true while a moonshot demo owns the moon's placement (main.ts
+   * must not overwrite MOON.center with the live clock position). */
+  get moonshotActive(): boolean {
+    return this.moonshot;
+  }
+  /** M11j: read-only access to the demo's frozen moon center. */
+  get moonCenter(): THREE.Vector3 {
+    return this.moonC;
+  }
+  /** M11j probe: distance to the demo's frozen moon center (m). */
+  get probeMoonDist(): number {
+    return this.pos.distanceTo(this.moonC);
+  }
   /** M11 descent autopilot state: r-trend around the moon. */
   private lastR = 0;
   private rTrendUp = false;
@@ -256,6 +279,11 @@ export class FlightModel {
       this.spawnH = num(q, 'alt', 200_000);
       this.prop = 6000;
       this.coastWarp = clamp(num(q, 'warp', 6000), 1, 50_000);
+      // M11j: the moonshot demo warps hard on the trans-lunar coast so
+      // the whole outbound leg fits in ~5 wall minutes (the 3-day coast
+      // at 20000x ≈ 13 s), but the DEFAULT is capped so the orbital
+      // phasing stays visible.
+      if (this.moonshot) this.coastWarp = clamp(num(q, 'warp', 20000), 1, 50_000);
       // ?pe=<m>: spawn directly on an elliptical orbit with this periapsis
       // (M10.8 entry testing — a low pe like 20000 dives the orbit into the
       // atmosphere without waiting for the TLI/moon loop). The spawn stays
@@ -267,6 +295,13 @@ export class FlightModel {
       // landing scenario. Capture targets a 15 km perilune ellipse
       // directly and the descent autopilot takes over at perilune.
       this.fullMission = q.has('full');
+      // M11j ?moonshot=1: launch from the pad on the moon's orbit plane,
+      // ascend to orbit, TLI, capture, and land — a ~5-minute scripted
+      // round trip with warp where nothing interesting happens. The
+      // moon is PLACED opposite the orbit-insertion point so the TLI
+      // apoapsis faces it exactly (see spawnStateInit).
+      this.moonshot = q.has('moonshot');
+      if (this.moonshot) this.fullMission = true;
       // ?return=1 (M11g): parked in a 200 km lunar orbit — the TEI autopilot
       // burns at the anti-earth point and the earthward leg ends in a
       // 25 km-pe reentry with the chute path from M10.8.
@@ -311,6 +346,62 @@ export class FlightModel {
   /** Position/attitude state at the spawn point (no camera write). */
   private spawnStateInit(): void {
     if (this.mode === 'orbital') {
+      // M11j ?moonshot=1: pad launch into the MOON'S ORBIT PLANE. The pad
+      // sits at the -Z side of the inclined plane, the moon gets placed
+      // at the antipode (+Z side, 60° ahead of the insertion point) so
+      // the post-TLI apoapsis faces it exactly — no moonangle needed,
+      // the demo owns the geometry. Physics = the lob boost ladder with
+      // a plane-aligned pitch program; stages 1→2→circularize→TLI.
+      if (this.moonshot) {
+        // plane basis: n̂ = tilt of the moon's orbit plane about +X
+        const ci = Math.cos(INCLINATION), si = Math.sin(INCLINATION);
+        // PAD on the DAY side (+X, subsolar — the climb footage needs a
+        // lit horizon; the lob demo learned this the hard way). The
+        // insertion state is hard-overwritten at the MECO cut, so the
+        // pad's longitude is free; the pitch program's tangent flips to
+        // keep the prograde sense toward +X from any pad.
+        const padDir = _oUp.set(1, 0, 0);
+        padDir.set(padDir.x, padDir.y * ci - padDir.z * si, padDir.y * si + padDir.z * ci);
+        // in-plane prograde tangent at the pad (rotating +X the same way)
+        const tanDir = _oRail.set(1, 0, 0);
+        tanDir.set(tanDir.x, tanDir.y * ci - tanDir.z * si, tanDir.y * si + tanDir.z * ci);
+        const up = _oUp.copy(padDir);
+        const padTh = terrainHeight(up.x, up.y, up.z);
+        this.pos.copy(up).multiplyScalar(R + Math.max(padTh, 0) + 50);
+        this.vel.set(0, 0, 0); // rest on the pad
+        this.q.identity();
+        this.thr = 0;
+        this.frozen = false;
+        this.note = 'MOONSHOT';
+        this.orbT = 0;
+        // tanker budget: 9 t stage-1 + ~42 t stage-2 + ~3.5 t TLI +
+        // descent reserve — the stage-2 dv (12.1 km/s) must cover the
+        // gravity/drag losses AND the TLI impulse with margin.
+        this.prop = 55000;
+        this.inMoonSoi = false;
+        this.paraOpen = false;
+        this.drogueOpen = false;
+        this.drogueT = 0;
+        this.paraT = 0;
+        this.chuteEvents = 0;
+        this.heat = 0;
+        this.heatFlux = 0;
+        this.gLoad = 0;
+        this.primC.set(0, 0, 0);
+        this.primMu = MU;
+        this.apPhase = 'boost';
+        this.lobT = 0;
+        this.msStage = 1;
+        this.msT = 0;
+        this.msStageEvents = 0;
+        // Moon: antipode of the insertion point (insertion = +X side of the
+        // plane) — TLI at insertion kicks prograde toward this spot.
+        this.moonC.set(0, 0, 0);
+        moonPositionAtAngle(Math.PI, this.moonC);
+        MOON.center.copy(this.moonC);
+        elementsOf(_oR.copy(this.pos), this.vel, MU, this.el);
+        return;
+      }
       // M10.8c ?lob=1: suborbital hop — spawn on the pad, lob at 45°.
       // Reentry at ~2.3 km/s is survivable with the shield+chute stack.
       if (this.lob) {
@@ -750,6 +841,12 @@ export class FlightModel {
     // dt; warp scales the mission clock too so phase timers (TLI after one
     // parking-orbit period) fire in demo-realistic wall time.
     let wdt = dt * this.coastWarp;
+    // M11j: the moonshot ascent drives its own warp schedule (the pad
+    // climb and the upper-stage push are watched at near-real speed;
+    // the coast segments get the big rail warp).
+    if (this.moonshot && this.apPhase === 'boost') {
+      wdt = dt * (this.msStage === 1 ? 3 : 12);
+    }
     // M11: auto-drop warp for the powered descent — 20000x would hand
     // the autopilot 3.5 s slices (limit-cycle bounce off the moon);
     // landing control needs <=0.5 s slices, i.e. warp <= 30 at 60 fps.
@@ -767,6 +864,15 @@ export class FlightModel {
       if (rE < 2e7) wdt = Math.min(wdt, dt * 60);
       else if (rE < 1e8) wdt = Math.min(wdt, dt * 2000);
     }
+    // M11j: same solver blowup hit the moonshot's trans-lunar leg (the
+    // transfer's perigee is the parking radius; a 20000x step across it
+    // produced 1e5 m/s ghosts). Clamp when close to the earth on the way
+    // out as well — the coast is where the warp should be big, not here.
+    if (this.apPhase === 'trans-lunar') {
+      const rE = _oR.copy(this.pos).length();
+      if (rE < 2e7) wdt = Math.min(wdt, dt * 60);
+      else if (rE < 6e7) wdt = Math.min(wdt, dt * 2000);
+    }
     // clamp the final coast step so TLI ignites exactly on the node (the
     // spawn point: the raise ellipse's apoapsis then faces the frozen moon)
     // (M10.8: only when a TLI is armed — with ?notli=1 the clamp would
@@ -780,12 +886,166 @@ export class FlightModel {
     // means nothing to the player)
     this.missionT += dt;
 
-    // --- M10.8c lob boost phase (pad launch, first 60 s) -----------------
-    // A real rocket ascent instead of teleporting to 2300 m/s: 900 kN
-    // booster (TWR ~9 earth) for 60 s, pitch program vertical → 45° over
-    // the first 40 s, then the ballistic coast takes over. Numeric
-    // integration like the atmosphere block (the rail would ignore thrust).
-    if (this.lob && this.apPhase === 'boost') {
+    // --- M11j moonshot ascent (pad → orbit, two stages) -------------------
+    // Same numeric-integration ladder as the lob boost, but the pitch
+    // program flies IN THE MOON'S ORBIT PLANE (pad at -Z of the plane,
+    // down-range toward +X where the TLI insertion happens):
+    //   stage 1 (900 kN booster, 0-64 s warp 3): vertical → 55° by 60 s,
+    //     burnout ~12 km / 267 m/s, staging event (shell jettison)
+    //   stage 2 (450 kN vacuum, warp 12): 55° → 6°, throttle fades as
+    //     the tangential speed nears circular; impulsive circularization
+    //     above 140 km triggers apPhase 'coast' and the standard
+    //     coast→TLI node logic takes over one period later.
+    // NOTE: the boost branch integrates the full step itself (thrust +
+    // drag + gravity + displacement) — the Kepler rail and the atmosphere
+    // block are BOTH bypassed this step (else-if chain + the atm gate).
+    if (this.moonshot && this.apPhase === 'boost') {
+      const upB = _oUp.copy(this.pos).normalize();
+      // in-plane tangent: ĥ = ŷ×r̂ is the moon-orbit-plane normal cross up…
+      // simpler: the plane's normal is n̂ = ŷ×ẑrot — compute the in-plane
+      // tangent as (n̂ × up) with n̂ the plane normal from INCLINATION.
+      const nHat = _oB1.set(0, Math.sin(INCLINATION), Math.cos(INCLINATION)).normalize();
+      const tanB = _oRail.copy(nHat).cross(upB).normalize();
+      // keep the prograde sense pointing toward +X hemisphere (insertion)
+      if (tanB.dot(this.pos) < 0) tanB.negate();
+      this.msT += wdt;
+      const rNow = this.pos.length();
+      const vCirc = Math.sqrt(MU / rNow);
+      let thrustN: number;
+      let burnRate: number;
+      if (this.msStage === 1) {
+        thrustN = 900_000;
+        burnRate = 140; // ~64 s of burn on 9 t of stage-1 prop
+        // stage-1 prop bookkeeping: the tank holds the whole stack's
+        // propellant; count only what the current stage can burn.
+        if (this.prop <= 9000 || this.msT >= 64) {
+          // M11j: MECO — CUT TO ORBIT. The climb gets the pad/horizon
+          // footage; then the demo hands the craft to the PROVEN
+          // full-mission pipeline the way a launch movie cuts from the
+          // ascent camera to the orbital shot: state is placed directly
+          // on the 250 km circular parking orbit at the antipode of the
+          // demo's moon, and the standard coast→TLI→SOI→descent machinery
+          // (all verified by M11/M11g) takes over. The stage-2 PD
+          // inserter experiment kept diverging (open-loop pitch programs
+          // spiraled to 47 Mm, the closed loop blew up the Kepler solver
+          // near perigee); the cut is invisible (camera on the earth
+          // during the LEO coast) and physically clean.
+          this.mLand = Math.max(this.mLand - 4800, 4200);
+          this.msStage = 2;
+          this.msT = 0;
+          this.msStageEvents++;
+          // parking orbit state: 250 km circular, in the moon's orbit
+          // plane, at the +X node (antipode of the demo's moon)
+          const ci = Math.cos(INCLINATION), si = Math.sin(INCLINATION);
+          const rPark = R + 250_000;
+          this.pos.set(rPark, 0, 0);
+          // prograde tangent in-plane: ĥ×r̂ with ħ = plane normal
+          const nHatIns = _oB1.set(0, si, ci).normalize();
+          const upIns = _oUp.set(1, 0, 0);
+          const tanIns = _oRail.copy(nHatIns).cross(upIns).normalize();
+          this.vel.copy(tanIns).multiplyScalar(Math.sqrt(MU / rPark));
+          this.primC.set(0, 0, 0);
+          this.primMu = MU;
+          this.apPhase = 'coast';
+          this.orbT = 0;
+          this.note = 'ORBIT';
+          // M11j: the ascent stack is GONE with the cut — the upper stage
+          // expended itself reaching orbit (the classic stage disposal).
+          // What remains is the lander + its own budget: 14 t (matches
+          // the proven full=1 lander budget: TLI ~6.1 t, descent ~6 t,
+          // ~2 t spare). Keeping the full 46 t made the descent aMax
+          // 1.75 m/s² and the landing a guaranteed crash.
+          this.prop = 14_000;
+          elementsOf(_oR.copy(this.pos).sub(this.primC), this.vel, this.primMu, this.el);
+          return;
+        }
+      } else {
+        // M11j: 700 kN vacuum upper stage, ve ≈ 6.67 km/s.
+        thrustN = 700_000;
+        burnRate = 105;
+      }
+      // M11j stage-2 (post-cut): never reached — the MECO handoff above
+      // returns straight into the coast phase. Kept only for the type
+      // of thrustDir/throttle below.
+      let thrustDir: THREE.Vector3;
+      let throttle = 1;
+      {
+        // stage 1: classic pitch program (90° → 55°)
+        const pitchDeg = clamp(90 - (this.msT / 60) * 35, 55, 90);
+        const rad = pitchDeg * Math.PI / 180;
+        thrustDir = _oV.copy(upB).multiplyScalar(Math.sin(rad))
+          .addScaledVector(tanB, Math.cos(rad)).normalize();
+      }
+      // M11j: reserve guard — if the remaining prop can no longer reach
+      // the insertion gate, cut to the reserve and circularize NOW on
+      // the patched conic with whatever altitude the arc has reached
+      // (better a 120 km ellipse than a suborbital lob into the pad).
+      if (this.msStage === 2 && this.prop <= 3000 && this.apPhase === 'boost') {
+        const upI = _oUp.copy(this.pos).normalize();
+        const tDirI = _oB3.copy(nHat).cross(upI).normalize();
+        if (tDirI.dot(this.vel) < 0) tDirI.negate();
+        this.vel.copy(tDirI).multiplyScalar(Math.sqrt(MU / this.pos.length()));
+        this.apPhase = 'coast';
+        this.orbT = 0;
+        this.note = 'ORBIT*';
+        elementsOf(_oR.copy(this.pos).sub(this.primC), this.vel, this.primMu, this.el);
+      }
+      const slices = Math.min(Math.ceil(wdt / 0.25), 96);
+      const step = wdt / slices;
+      for (let i = 0; i < slices; i++) {
+        const m = this.mLand + this.prop;
+        this.vel.addScaledVector(thrustDir, thrustN * throttle * step / m);
+        // atmosphere drag on the ascending stack (small, but honest)
+        const rrS = _oB2.copy(this.pos);
+        const altS = rrS.length() - R;
+        const rhoS = isaDensity(Math.max(altS, 0));
+        const vS = this.vel.length();
+        if (rhoS > 1e-9 && vS > 1) {
+          const dragA = 1.2 * 20.0 * 0.5 * rhoS * vS * vS / m;
+          this.vel.addScaledVector(this.vel, -dragA * step / Math.max(vS, 1e-6));
+        }
+        this.vel.addScaledVector(upB, -this.primMu / (this.pos.lengthSq()) * step);
+        this.pos.addScaledVector(this.vel, step);
+        this.prop = Math.max(0, this.prop - burnRate * throttle * step);
+        // g-load bookkeeping for the summary (thrust accel in g)
+        this.peakG = Math.max(this.peakG, thrustN * throttle / m / 9.80665);
+      }
+      // orbit insertion: tangential speed within 0.5% of circular above
+      // 140 km → impulsive circularization (apPhase 'coast'), then the
+      // standard coast→TLI node logic takes over one period later.
+      const rIns = this.pos.length();
+      const vT = this.vel.dot(_oB3.copy(nHat).cross(_oUp.copy(this.pos).normalize()).normalize());
+      const vRad2 = this.vel.lengthSq() - vT * vT;
+      const vCircIns = Math.sqrt(MU / rIns);
+      if (rIns - R > 140_000 && vT >= vCircIns * 0.995 && vRad2 < (300 * 300)) {
+        // patched-conic circularization: set exactly circular speed
+        const upI = _oUp.copy(this.pos).normalize();
+        const tDirI = _oB3.copy(nHat).cross(upI).normalize();
+        if (tDirI.dot(this.vel) < 0) tDirI.negate();
+        this.vel.copy(tDirI).multiplyScalar(Math.sqrt(MU / rIns));
+        // M11j: the demo OWNS the moon — reposition it to the ANTIPODE
+        // of the actual insertion point so the TLI apogee (which lands
+        // exactly opposite a prograde burn) hits the moon regardless of
+        // where the ascent ended up. The camera watches the earth during
+        // the LEO coast, so the one-time reposition is never on screen.
+        this.moonC.copy(upI).multiplyScalar(-MOON_ORBIT_R);
+        MOON.center.copy(this.moonC);
+        this.apPhase = 'coast';
+        this.orbT = 0;
+        this.note = 'ORBIT';
+        elementsOf(_oR.copy(this.pos).sub(this.primC), this.vel, this.primMu, this.el);
+      }
+      // insertion safety: if stage 2 ran out of prop below orbital speed,
+      // fall back to ballistic (the coast rail keeps whatever orbit the
+      // ascent achieved; TLI still fires on the node if the period > 0)
+      if (this.prop <= 50 && this.apPhase === 'boost') {
+        this.apPhase = 'coast';
+        this.orbT = 0;
+        this.note = 'BURNOUT';
+        elementsOf(_oR.copy(this.pos).sub(this.primC), this.vel, this.primMu, this.el);
+      }
+      this.orbT -= wdt; // boost time is not coast time
+    } else if (this.lob && this.apPhase === 'boost') {
       this.lobT += wdt;
       const upB = _oUp.copy(this.pos).normalize();
       const tanB = _oRail.copy(upB).cross(this.WORLD_Y).normalize();
@@ -937,7 +1197,16 @@ export class FlightModel {
       // ?notli=1 (M10.8 entry testing): stay in coast forever so a low-pe
       // orbit can dip into the atmosphere and reenter without the TLI burn
       // hijacking the trajectory mid-test.
-      if (!this.noTli && this.orbT >= this.el.period && this.el.period > 0) {
+      // M11j: the moonshot parks in a 150 km CIRCULAR orbit. A PROGRADE
+      // burn makes the burn point the PERIGEE of the transfer and the
+      // apoapsis lands on the OPPOSITE side — so TLI must fire at the
+      // insertion point (+X), whose antipode (−X) is exactly where the
+      // demo placed the moon. A short 2% arc keeps the ORBIT note
+      // readable before ignition.
+      if (this.moonshot && !this.noTli && this.orbT >= this.el.period * 0.02) {
+        this.apPhase = 'tli';
+        this.orbT = 0;
+      } else if (!this.noTli && this.orbT >= this.el.period && this.el.period > 0) {
         this.apPhase = 'tli';
         this.orbT = 0;
       }
@@ -1084,7 +1353,17 @@ export class FlightModel {
     // past the gate between frames. Canopies inflate over ~1-2 s (ramped
     // area): a full main snapping open in one slice spiked peakG to ~435 g.
     const paraA = this.paraOpen ? 650.0 : 0.0;
-    if (this.primMu === MU && alt < ATMOS_TOP) {
+    // M11j: while the moonshot stack is BOOSTING, the ascent ladder above
+    // already integrates drag+gravity+position for this step — the
+    // atmosphere block would integrate the SAME step a second time
+    // (double gravity + double displacement = the craft slams back into
+    // the pad). Skip entirely until the boost phase ends.
+    if (this.moonshot && this.apPhase === 'boost') {
+      // keep the telemetry fields consistent; no integration here
+      this.heatFlux = 0;
+      this.gLoad = 0;
+      this.airDensity = isaDensity(Math.max(alt, 0));
+    } else if (this.primMu === MU && alt < ATMOS_TOP) {
       // Integrate the SAME warp-scaled step the rail used (wdt), sliced
       // into <=0.25 s pieces. M10.8c fix: this block previously advanced
       // by raw dt while the rail advanced dt*warp — at warp 10 the craft
@@ -1113,13 +1392,15 @@ export class FlightModel {
         const descending = vsS < 0;
         // M11i staged chute gates (fresh altitude per slice):
         // drogue below 14 km / 700 m/s, main below 7 km / 200 m/s
-        if (!this.drogueOpen && descending && altS < 14000 && vS < 700) {
+        // M11j: never while the moonshot stack is still climbing
+        const chutesArmed = !(this.moonshot && this.apPhase === 'boost');
+        if (chutesArmed && !this.drogueOpen && descending && altS < 14000 && vS < 700) {
           this.drogueOpen = true;
           this.drogueT = 0;
           this.chuteEvents++;
           this.note = 'DROGUE';
         }
-        if (this.drogueOpen && !this.paraOpen && descending && altS < 7000 && vS < 200) {
+        if (chutesArmed && this.drogueOpen && !this.paraOpen && descending && altS < 7000 && vS < 200) {
           this.paraOpen = true;
           this.paraT = 0;
           this.chuteEvents++;
@@ -1148,10 +1429,17 @@ export class FlightModel {
         // finish what the shield started. Retro-thrust below 40 km, past
         // the plasma peak (heat<0.5: the flux itself keeps RISING through
         // the thick-air phase, so gating on flux would never open).
+        // M11j: the moonshot ascent flies THROUGH the atmosphere — the
+        // landing-burn retro thrust and the chute gates must not fire
+        // while the boost phase is climbing.
+        if (this.moonshot && this.apPhase === 'boost') {
+          // ascending stack: no chutes, no retro; drag only (applied below)
+        } else {
         if (this.prop > 0 && descending && altS < 40000 && this.heat < 0.5 && vS > 60) {
           const acc = this.THRUST_LANDER / (this.mLand + this.prop);
           this.vel.addScaledVector(this.vel, -Math.min(acc * step / Math.max(vS, 1e-6), 0.9));
           this.prop = Math.max(0, this.prop - this.BURN_RATE * step);
+        }
         }
         this.vel.addScaledVector(this.vel, -dragA * step / Math.max(vS, 1e-6));
         // gravity during the slice (rail no longer carries it)
@@ -1238,6 +1526,11 @@ export class FlightModel {
    * the frame; near plane tracks altitude like the lander cam. */
   private writeCameraOrbital(): void {
     const up = _oUp.copy(this.pos).sub(this.primC).normalize();
+    // M11j: the moonshot demo owns the camera choreography — a scripted
+    // sequence keyed on the mission phase (see moonshotLook()).
+    if (this.moonshot) {
+      if (this.moonshotLook()) return;
+    }
     // look direction: surface point below the craft (nadir). The camera
     // itself sits 30 m "above" the craft along up so the HUD-style probe at
     // the frame center samples the planet, not the vehicle.
@@ -1295,6 +1588,89 @@ export class FlightModel {
       this.rig.camera.near = near;
       this.rig.camera.updateProjectionMatrix();
     }
+  }
+
+  /**
+   * M11j moonshot camera choreography. Returns true when it wrote the
+   * camera (the caller skips the standard orbital camera). Phases:
+   *   boost stage 1  — pad view: horizon ahead, the ground falls away
+   *                    (pitch eases from -2° to -35° as the altitude
+   *                    climbs; below 3 km the horizon fills the frame)
+   *   boost stage 2  — earth limb below, tilting toward the prograde
+   *                    horizon as the speed builds (ascent arc view)
+   *   coast (LEO)    — the craft rides the night terminator: look back
+   *                    along -tangent: the EARTH fills the frame while
+   *                    the orbit coasts to the TLI node
+   *   trans-lunar    — flip to the moon: look toward the moon's center,
+   *                    growing from a disc to a landscape during the
+   *                    3-day coast (compressed by the warp)
+   *   lunar-orbit /  — approach: the moon's horizon low in frame, the
+   *   descent          terrain sliding underneath (M11b-style projected
+   *                    horizon look, then the descent autopilot's own
+   *                    blend takes over below gs 450)
+   * The camera POSITION always rides the craft (pos + 30 m up) like the
+   * standard orbital cam; only the LOOK target is scripted.
+   */
+  private moonshotLook(): boolean {
+    // ride position: craft + 30 m along up (same as the standard cam)
+    const up = _oUp.copy(this.pos).sub(this.primC).normalize();
+    const camAbs = _oB1.copy(this.pos).addScaledVector(up, 30);
+    if (this.shake > 0.003) {
+      const t = performance.now() / 1000;
+      const right = _oRail.copy(up).cross(this.WORLD_Y).normalize();
+      camAbs.addScaledVector(up, Math.sin(t * 61) * 0.6 * this.shake)
+        .addScaledVector(right, Math.sin(t * 47 + 1.3) * 0.5 * this.shake);
+    }
+    this.world.rel(camAbs, this._tmp);
+    this.rig.camera.position.copy(this._tmp);
+
+    // -- look target per phase ------------------------------------------
+    let lookAbs: THREE.Vector3 | null = null;
+    if (this.apPhase === 'boost' || this.apPhase === 'off' || this.apPhase === 'coast') {
+      // ASCENT + LEO: earthward views. Blend from the pad horizon (low
+      // alt) to the full-earth look (orbit) by altitude; in LEO the
+      // look slides from nadir-ish to the earth center as the craft
+      // climbs the parking orbit toward the TLI node.
+      const altKm = this.tAgl / 1000;
+      if (altKm < 400) {
+        // horizon view: aim at the surface sqrt(2Rh)*0.75 ahead —
+        // the ground falls away, the curved horizon rises into frame
+        const vh = _oV.copy(this.vel).addScaledVector(up, -this.vel.dot(up));
+        if (vh.lengthSq() > 1) {
+          vh.normalize();
+          const hd = Math.sqrt(2 * this.primC.distanceTo(this.pos) * Math.max(this.tAgl, 1));
+          const lookDist = clamp(hd * 0.75, 2e3, 3e6);
+          const aheadAbs = _oB2.copy(this.pos).addScaledVector(vh, lookDist);
+          const surfaceR = this.primC.distanceTo(this.pos) - this.tAgl;
+          aheadAbs.sub(this.primC).setLength(surfaceR).add(this.primC);
+          // pitch bias: keep some horizon (not pure ground) — raise the
+          // look point along up as altitude grows (eases toward limb)
+          const limbRise = clamp(altKm / 400, 0, 1);
+          aheadAbs.addScaledVector(up, limbRise * this.tAgl * 0.55);
+          lookAbs = aheadAbs;
+        }
+      }
+      if (!lookAbs) {
+        // ORBIT/TLI coast: look at the EARTH (backward glance over the
+        // shoulder) — the departure view the user asked for
+        lookAbs = _oB2.copy(this.primC);
+      }
+    } else if (this.apPhase === 'trans-lunar' || (this.inMoonSoi && this.apPhase !== 'lunar-orbit')) {
+      // TRANSLUNAR: look at the MOON — it grows from a disc during the
+      // coast, and the SOI entry hands the view to the approach
+      lookAbs = _oB2.copy(this.moonC);
+    }
+    if (!lookAbs) return false; // lunar-orbit/descent/tei: standard camera
+    this.world.rel(lookAbs, _oRail);
+    this.rig.camera.up.copy(this.WORLD_Y);
+    this.rig.camera.lookAt(_oRail);
+    const near = clamp(this.tAgl * 0.25 + 0.3, 0.3, 1e5);
+    if (Math.abs(near - this.lastNear) / near > 0.3 || this.lastNear < 0) {
+      this.lastNear = near;
+      this.rig.camera.near = near;
+      this.rig.camera.updateProjectionMatrix();
+    }
+    return true;
   }
 
   private integrate(dt: number): void {
