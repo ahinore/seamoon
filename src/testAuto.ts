@@ -58,16 +58,27 @@ export class AutoPilot {
 
   constructor(rig: CameraRig, world: WorldOrigin) {
     const q = new URLSearchParams(location.search);
-    // M11j: ?ground=1 — the EARTH surface with the horizon in view: the
+    // M11k: ?ground=1 — the EARTH surface with the horizon in view: the
     // free camera stands on the terrain (AGL ~1.7 m gear height) looking
     // at the horizon. Implies demo=hover (static pose at ground level),
-    // pitch=0 (horizon-grazing tilt from nadir), agl=1, alt=2 m. Set
+    // pitch=-60 (horizon framed at the upper third), agl=1, alt=2 m. Set
     // BEFORE the mode/alt reads below.
-    if (q.get('ground') === '1' && q.get('body') !== 'moon') {
+    // M11k: a BARE url (no demo/alt/pitch/lat/lon/hdg) now defaults to the
+    // same ground start — the old 25,000 km sphere-rail spawn showed the
+    // earth as a small disc (technically correct, useless as a first
+    // impression). Explicit params keep the historical behavior.
+    const bare = !q.get('demo') && !q.has('alt') && !q.has('pitch')
+      && !q.has('lat') && !q.has('lon') && !q.has('hdg');
+    if ((q.get('ground') === '1' || bare) && q.get('body') !== 'moon') {
       if (!q.get('demo')) q.set('demo', 'hover');
       // pitch: the URL value wins when explicitly given (ground=1 only
       // sets the default); agl=1 + alt=2 m put the camera ON the terrain.
-      if (!q.has('pitch')) q.set('pitch', '0');
+      if (!q.has('pitch')) q.set('pitch', '-60');
+      // day-side default pad (the subsolar point) — the historical default
+      // (5.5, -104) spawned on the night side: "opening the app shows
+      // nothing" reports.
+      if (!q.has('lat')) q.set('lat', '15.8');
+      if (!q.has('lon')) q.set('lon', '19.3');
       q.set('agl', '1');
       if (!q.has('alt')) q.set('alt', '2');
     }

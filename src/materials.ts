@@ -126,9 +126,9 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
         if (uLampOn > 0.001) {
           vec3 toLamp = uLampPos - vWorld;
           float d2 = max(dot(toLamp, toLamp), 4.0);
-          float atten = uLampOn * 2.2e7 / d2;
+          float atten = min(uLampOn * 3.0e4 / d2, 30.0);
           float ndlLamp = clamp(dot(normalize(vN), normalize(toLamp)), 0.0, 1.0);
-          float near = smoothstep(12.0, 70.0, sqrt(d2));
+          float near = smoothstep(1.5, 5.0, sqrt(d2));
           col += vec3(1.0, 0.96, 0.88) * (ndlLamp * atten * near) * vCol * 6.0;
         }
 

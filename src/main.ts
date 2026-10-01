@@ -271,10 +271,19 @@ rigRef = rig;
 const _up = new THREE.Vector3();
 
 window.addEventListener('keydown', (e) => {
+  // key repeat fires toggle handlers many times per second — a held G
+  // would leave the wireframe in a random state ("wires appear for no
+  // reason"). First press only.
+  if (e.repeat) return;
   if (e.code === 'KeyG') {
     // Wireframe overlay is drawn in the fragment shader (grid lines on the
     // visible surface only — no back-face edges, no diagonal clutter).
-    material.uniforms.uWire.value = material.uniforms.uWire.value > 0.5 ? 0 : 1;
+    // Toggle BOTH bodies: G on the moon used to do nothing (only the
+    // earth material was flipped).
+    const on = material.uniforms.uWire.value > 0.5 ? 0 : 1;
+    material.uniforms.uWire.value = on;
+    moonMaterial.uniforms.uWire.value = on;
+    hud.setNote('wire ' + (on ? 'ON' : 'OFF'));
   }
   if (e.code === 'KeyH') {
     // Home: teleport back to the session spawn position/orientation. The
@@ -600,8 +609,15 @@ for (let i = 0; i < speedup; i++) {
     lamMoon.uLampOn.value = lampOn;
     lamEarth.uLampOn.value = lampOn;
     if (lampOn > 0.001) {
-      lamMoon.uLampPos.value.copy(absCam);
-      lamEarth.uLampPos.value.copy(absCam);
+      // The shaders compare uLampPos against vWorld, which is FRAME-relative
+      // (modelMatrix positions). absCam is ABSOLUTE — subtract the floating
+      // origin or the pool is displaced by |origin| (up to the 2 km rebase
+      // threshold) and its inverse-square atten collapses to zero. This was
+      // the flaky "night approach is pitch black" bug: it worked right
+      // after spawn (origin 0) and died after any rebase.
+      _bodyUp.copy(absCam).sub(world.origin);
+      lamMoon.uLampPos.value.copy(_bodyUp);
+      lamEarth.uLampPos.value.copy(_bodyUp);
     }
   }
   // sea material shares the terrain's uniform objects (updated above); only
