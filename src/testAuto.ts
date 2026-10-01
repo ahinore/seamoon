@@ -58,6 +58,19 @@ export class AutoPilot {
 
   constructor(rig: CameraRig, world: WorldOrigin) {
     const q = new URLSearchParams(location.search);
+    // M11j: ?ground=1 — the EARTH surface with the horizon in view: the
+    // free camera stands on the terrain (AGL ~1.7 m gear height) looking
+    // at the horizon. Implies demo=hover (static pose at ground level),
+    // pitch=0 (horizon-grazing tilt from nadir), agl=1, alt=2 m. Set
+    // BEFORE the mode/alt reads below.
+    if (q.get('ground') === '1' && q.get('body') !== 'moon') {
+      if (!q.get('demo')) q.set('demo', 'hover');
+      // pitch: the URL value wins when explicitly given (ground=1 only
+      // sets the default); agl=1 + alt=2 m put the camera ON the terrain.
+      if (!q.has('pitch')) q.set('pitch', '0');
+      q.set('agl', '1');
+      if (!q.has('alt')) q.set('alt', '2');
+    }
     this.mode = q.get('demo') ?? '';
     this.alt0 = num(q, 'alt0', 25_000_000);
     this.alt1 = num(q, 'alt1', 100);
