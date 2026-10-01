@@ -29,6 +29,11 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uToneMap: { value: 1 },
       // M10.4: 1 = per-pixel procedural detail splatting (?detail=0 A/B).
       uDetail: { value: 1 },
+      // M11k: lander floodlight (mirrors moonMaterial's uLampPos/uLampOn) —
+      // a camera-anchored point light for night-side landings on EARTH
+      // (the return mission's touchdown is on the planet's night side).
+      uLampPos: { value: new THREE.Vector3() },
+      uLampOn: { value: 0 },
     },
     vertexShader: /* glsl */ `
       #include <common>
@@ -64,6 +69,8 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uniform float uHM;
       uniform float uToneMap;
       uniform float uDetail;
+      uniform vec3 uLampPos;
+      uniform float uLampOn;
       varying vec3 vN;
       varying vec3 vC;
       varying vec3 vGrid;
@@ -111,6 +118,19 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
         float ndl = clamp((dot(normalize(vN), uSunDir) + 0.18) / 1.18, 0.0, 1.0);
         // per-vertex terrain color (sRGB-ish values authored in linear space)
         vec3 col = vCol * (0.10 + 0.90 * ndl);
+
+        // M11k: lander floodlight pool — the same inverse-square warm
+        // point light the moon material carries, for night-side landings
+        // on EARTH (the return mission touches down on the planet's
+        // night side; the final approach is otherwise pitch black).
+        if (uLampOn > 0.001) {
+          vec3 toLamp = uLampPos - vWorld;
+          float d2 = max(dot(toLamp, toLamp), 4.0);
+          float atten = uLampOn * 2.2e7 / d2;
+          float ndlLamp = clamp(dot(normalize(vN), normalize(toLamp)), 0.0, 1.0);
+          float near = smoothstep(12.0, 70.0, sqrt(d2));
+          col += vec3(1.0, 0.96, 0.88) * (ndlLamp * atten * near) * vCol * 6.0;
+        }
 
         // M10.4: per-pixel detail splatting. World-space noise (absolute pos
         // via vWorld + uOrigin) so the pattern is continuous across tile

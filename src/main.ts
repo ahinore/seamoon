@@ -575,25 +575,30 @@ for (let i = 0; i < speedup; i++) {
   // to (SOI handoff reference; steers the rig's altitude/zenith). The rule
   // lives in frames.ts (M9.6) — one definition for the whole app.
   nearBody = nearestFrame(absCam);
-  // M11c lander floodlight: on the moon's night side below 60 km AGL the
-  // camera carries a warm point light that pools on the terrain ahead —
-  // the final approach is otherwise pitch black (the landing site is on
-  // the lunar far side from the sun in the TLI approach geometry).
+  // M11c/M11k lander floodlight: on EITHER body's night side below 60 km
+  // AGL the camera carries a warm point light that pools on the terrain
+  // ahead — the final approach is otherwise pitch black (the M11c moon
+  // landing and the M11g return's earth night-side touchdown both need
+  // it; the same uniform pair now lives in both materials).
   {
-    const lam = moonMaterial.uniforms;
-    const onMoon = nearBody === 'moon';
     let lampOn = 0;
-    if (onMoon) {
-      const altM = absCam.distanceTo(MOON.center) - R_MOON;
-      if (altM < 60000) {
-        _bodyUp.copy(absCam).sub(MOON.center).normalize();
-        const sunDot = _bodyUp.dot(atmoUniforms.uSunDir.value);
-        // night side: sunDot < -0.1; ramp the lamp in as sun falls away
-        lampOn = THREE.MathUtils.clamp(-sunDot * 3.0, 0, 1);
-      }
+    const center = nearBody === 'moon' ? MOON.center : _up.set(0, 0, 0);
+    const bodyR = nearBody === 'moon' ? R_MOON : R;
+    const altN = absCam.distanceTo(center) - bodyR;
+    if (altN < 60000) {
+      _bodyUp.copy(absCam).sub(center).normalize();
+      const sunDot = _bodyUp.dot(atmoUniforms.uSunDir.value);
+      // night side: sunDot < -0.1; ramp the lamp in as sun falls away
+      lampOn = THREE.MathUtils.clamp(-sunDot * 3.0, 0, 1);
     }
-    lam.uLampOn.value = lampOn;
-    if (lampOn > 0.001) lam.uLampPos.value.copy(absCam);
+    const lamMoon = moonMaterial.uniforms;
+    const lamEarth = material.uniforms;
+    lamMoon.uLampOn.value = lampOn;
+    lamEarth.uLampOn.value = lampOn;
+    if (lampOn > 0.001) {
+      lamMoon.uLampPos.value.copy(absCam);
+      lamEarth.uLampPos.value.copy(absCam);
+    }
   }
   // sea material shares the terrain's uniform objects (updated above); only
   // its own time / viewport uniforms need ticking here.
