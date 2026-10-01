@@ -604,6 +604,7 @@ for (let i = 0; i < speedup; i++) {
     (window as unknown as { __scene: unknown }).__scene = scene;
     (window as unknown as { __renderer: unknown }).__renderer = renderer;
     (window as unknown as { __views: unknown }).__views = { planet, sea, moonView };
+    (window as unknown as { __rig: unknown }).__rig = rig; // M11i probe (camera pose)
   }
 
   // M10.8 reentry plasma overlay: brightness follows the flight model's
