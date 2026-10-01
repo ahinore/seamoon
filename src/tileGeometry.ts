@@ -173,11 +173,24 @@ export function buildTileGeometry(
       const hy = dirLat[k * 3 + 1];
       const hz = dirLat[k * 3 + 2];
       const h = hLat[k];
+      // M11f: tilt the skirt inward. A purely radial wall is near-coplanar
+      // with the neighbour's edge triangles at grazing view angles and
+      // z-fights as stripe bands (seen on the moon's horizon). Moving the
+      // dropped ring toward the tile center slants the wall under this
+      // tile, away from any neighbour surface.
+      let sx = hx, sy = hy, sz = hz;
+      if (skirt) {
+        sx = hx - (hx - center.x / radius) * 0.06;
+        sy = hy - (hy - center.y / radius) * 0.06;
+        sz = hz - (hz - center.z / radius) * 0.06;
+        const sl = Math.sqrt(sx * sx + sy * sy + sz * sz);
+        sx /= sl; sy /= sl; sz /= sl;
+      }
       const r = skirt ? radius + h - skirtDepth : radius + h;
       // double-precision subtraction before float32 quantization
-      positions[ptr] = hx * r - center.x;
-      positions[ptr + 1] = hy * r - center.y;
-      positions[ptr + 2] = hz * r - center.z;
+      positions[ptr] = sx * r - center.x;
+      positions[ptr + 1] = sy * r - center.y;
+      positions[ptr + 2] = sz * r - center.z;
 
       if (skirt) {
         // skirt is a hidden wall: sphere normal, shading irrelevant
