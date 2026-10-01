@@ -612,7 +612,7 @@ renderer.setAnimationLoop(() => {
     ...(speedup > 1 ? [`speedup x${speedup}`] : []),
     ...(rebased > 0 ? [`rebase x${rebased} (total ${world.rebaseCount})`] : []),
     ...(probe ? [`probe ${probe()}`] : []),
-    `alt ${fmtDist(alt)} (${nearBody})  speed ${fmtDist(rig.currentSpeed)}/s  x${rig.speedMultiplier}`,
+    `alt ${fmtDist(alt)} (${nearBody})  speed ${fmtDist(rig.stickMode && !flight.frozen ? flight.tGs : rig.currentSpeed)}/s  x${rig.speedMultiplier}`,
     `moon dist ${fmtDist(moonDist)}  tiles ${moonView.stats.visibleTiles} L${moonView.stats.maxVisibleLevel}`,
     `pitch ${look.pitch.toFixed(1)}°  bank ${look.bank.toFixed(1)}°  hdg ${look.heading.toFixed(0)}°  level ${rig.autoLevel ? 'on(R)' : 'off(R)'}`,
     `revz ${(renderer as unknown as { capabilities: { reverseDepthBuffer: boolean } }).capabilities.reverseDepthBuffer ? 'ON' : 'off'}  aa ${urlParams.get('aa') === '0' ? 'off' : 'on'}`,

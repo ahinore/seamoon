@@ -176,6 +176,9 @@ export class FlightModel {
   peakHeat = 0;
   missionT = 0;
   touchdownVs = 0;
+  // M11g: lunar-return mission flag + one-shot TEI guard
+  returnMission = false;
+  returnedFromMoon = false;
   /** ?pe= test hook: elliptical spawn with this periapsis (null = circular). */
   private peOverride: number | null = null;
 
@@ -255,6 +258,10 @@ export class FlightModel {
       // landing scenario. Capture targets a 15 km perilune ellipse
       // directly and the descent autopilot takes over at perilune.
       this.fullMission = q.has('full');
+      // ?return=1 (M11g): parked in a 200 km lunar orbit — the TEI autopilot
+      // burns at the anti-earth point and the earthward leg ends in a
+      // 25 km-pe reentry with the chute path from M10.8.
+      this.returnMission = q.has('return');
       // The landing burn alone needs ~1.4 t (1730 m/s at ve 5625 from the
       // 15 km-perilune ellipse); TLI + capture eat 7.3 t of tank, so the
       // full mission spawns with a tanker-tender budget.
@@ -362,10 +369,31 @@ export class FlightModel {
       this.primC.set(0, 0, 0);
       this.primMu = MU;
       this.apPhase = 'coast';
+      // M11g ?return=1: override the LEO spawn with a 200 km circular
+      // LUNAR orbit. The moon sits frozen at +X (MOON.center above); the
+      // TEI autopilot (apPhase 'tei') handles the escape burn.
+      if (this.returnMission) {
+        this.primC.copy(this.moonC);
+        this.primMu = MU_MOON;
+        this.inMoonSoi = true;
+        this.returnedFromMoon = false;
+        this.prop = 4000;
+        // 200 km circular orbit, prograde-tangential around the moon.
+        // Orbit plane: worldY × moon-up so the burn at the anti-earth
+        // point kicks the craft along -X (earthward).
+        const rRel = _oR.copy(this.pos).sub(this.moonC);
+        rRel.setLength(R_MOON + 200_000);
+        this.pos.copy(this.moonC).add(rRel);
+        const upM = _oUp.copy(rRel).multiplyScalar(1 / rRel.length());
+        this.vel.copy(this.WORLD_Y).cross(upM).normalize()
+          .multiplyScalar(Math.sqrt(MU_MOON / rRel.length()));
+        this.apPhase = 'tei';
+        this.orbT = 0;
+      }
       // Seed the osculating elements so the coast-warp clamp (TLI exactly on
       // the spawn node) is valid from the very first frame — at high warp a
       // single unclamped step could overshoot the whole parking period.
-      elementsOf(_oR.copy(this.pos), this.vel, MU, this.el);
+      elementsOf(_oR.copy(this.pos), this.vel, this.primMu, this.el);
       return;
     }
     if (this.mode === 'lunar') {
@@ -712,6 +740,16 @@ export class FlightModel {
       const rAg = _oR.copy(this.pos).sub(this.moonC).length() - R_MOON;
       if (rAg < 200_000) wdt = Math.min(wdt, dt * 30);
     }
+    // M11g: auto-drop warp on the earthward leg — a 20000x Kepler step
+    // through perigee explodes (the analytic rail is exact per step, but
+    // the SOLVER's time step at perigee speed 11 km/s x 20000x hops past
+    // the planet). Cap the step when the earth is close; the atmosphere
+    // block slices its own integration from there.
+    if (this.apPhase === 'trans-earth') {
+      const rE = _oR.copy(this.pos).length();
+      if (rE < 2e7) wdt = Math.min(wdt, dt * 60);
+      else if (rE < 1e8) wdt = Math.min(wdt, dt * 2000);
+    }
     // clamp the final coast step so TLI ignites exactly on the node (the
     // spawn point: the raise ellipse's apoapsis then faces the frozen moon)
     // (M10.8: only when a TLI is armed — with ?notli=1 the clamp would
@@ -892,7 +930,7 @@ export class FlightModel {
     const rm = r.length();
 
     // --- SOI handoff (earth -> moon) ------------------------------------
-    if (!this.inMoonSoi) {
+    if (!this.inMoonSoi && !this.returnedFromMoon) {
       const dMoon = this.pos.distanceTo(this.moonC);
       if (dMoon < SOI_MOON) {
         this.inMoonSoi = true;
@@ -937,6 +975,49 @@ export class FlightModel {
     }
 
     // --- thrust (impulse only — the coast above already propagated) ------
+    if (this.apPhase === 'tei') {
+      // M11g TEI: wait until near the anti-earth point (the departure node
+      // for a minimum-dv earthward transfer), then escape the moon SOI with
+      // a small residual and re-anchor the orbit on the EARTH. The moon is
+      // frozen (no orbital velocity), so the patched-conic exit velocity is
+      // simply the apoapsis speed of the return ellipse: a tangential
+      // 5.8 m/s at the moon's radius gives pe ≈ 25 km — the chute path
+      // takes it from there.
+      const rRelT = _oR.copy(this.pos).sub(this.moonC);
+      const rT = rRelT.length();
+      const antiEarth = -rRelT.x / rT; // +1 when on the far side from earth
+      if (antiEarth > 0.95) {
+        // apoapsis speed of the earth-return ellipse (ra = moon distance,
+        // rp = R + 25 km)
+        const ra = MOON_ORBIT_R;
+        const rpE = R + 25_000;
+        const aE = (ra + rpE) / 2;
+        const vApo = Math.sqrt(MU * (2 / ra - 1 / aE));
+        // moon-frame hyperbolic excess: matching the tangential vApo at
+        // exit means v_inf ≈ vApo (the moon is static in this frame)
+        const vLeave = Math.sqrt(vApo * vApo + 2 * MU_MOON / rT);
+        const hV2 = _oV.copy(rRelT).cross(this.vel);
+        const tDir2 = _oUp.copy(hV2).normalize().cross(rRelT).normalize();
+        const dv = vLeave - this.vel.length();
+        if (dv > 0 && this.prop > 10) {
+          this.vel.addScaledVector(tDir2, dv);
+          const ve = this.THRUST_LANDER / this.BURN_RATE;
+          this.prop = Math.max(0, this.prop - (this.mLand + this.prop) * (1 - Math.exp(-dv / ve)));
+        }
+        // exit the SOI: hand the orbit to the EARTH with the exact patched-
+        // conic solution (tangential vApo at the moon's radius)
+        this.inMoonSoi = false;
+        this.returnedFromMoon = true;
+        this.primC.set(0, 0, 0);
+        this.primMu = MU;
+        const tangential = _oB1.copy(this.WORLD_Y).cross(_oUp.copy(this.pos).normalize()).normalize();
+        this.vel.copy(tangential).multiplyScalar(-vApo); // retrograde: dives to the 25 km pe
+        this.pos.copy(this.moonC).add(_oR.copy(this.pos).sub(this.moonC)); // unchanged, clarity
+        elementsOf(_oR.copy(this.pos), this.vel, MU, this.el);
+        this.apPhase = 'trans-earth';
+        this.note = 'TEI DONE';
+      }
+    }
     if (this.apPhase === 'tli') {
       // Patched-conic TLI: impulsive prograde burn from the circular parking
       // speed to the transfer-ellipse speed at this radius (vis-viva). KSP-
