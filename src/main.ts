@@ -608,6 +608,7 @@ renderer.setAnimationLoop(() => {
     ...errors.slice(-3),
     ...(autoLine ? [autoLine] : []),
     ...(rig.stickMode ? [flight.statusLine()] : []),
+    ...flight.missionSummary(),
     ...(speedup > 1 ? [`speedup x${speedup}`] : []),
     ...(rebased > 0 ? [`rebase x${rebased} (total ${world.rebaseCount})`] : []),
     ...(probe ? [`probe ${probe()}`] : []),

@@ -171,6 +171,11 @@ export class FlightModel {
   heatFlux = 0;
   /** Deceleration load in g. */
   gLoad = 0;
+  // M11f: mission summary bookkeeping (peak values, reset on spawn)
+  peakG = 0;
+  peakHeat = 0;
+  missionT = 0;
+  touchdownVs = 0;
   /** ?pe= test hook: elliptical spawn with this periapsis (null = circular). */
   private peOverride: number | null = null;
 
@@ -349,6 +354,11 @@ export class FlightModel {
       this.heat = 0;
       this.heatFlux = 0;
       this.gLoad = 0;
+      // M11f: reset the mission summary peaks
+      this.peakG = 0;
+      this.peakHeat = 0;
+      this.missionT = 0;
+      this.touchdownVs = 0;
       this.primC.set(0, 0, 0);
       this.primMu = MU;
       this.apPhase = 'coast';
@@ -710,6 +720,10 @@ export class FlightModel {
       wdt = Math.min(wdt, Math.max(this.el.period - this.orbT, 0));
     }
     this.orbT += wdt;
+    // M11f: mission wall-clock — REAL seconds, not warp-scaled (a
+    // warp-scaled clock reads 8616 minutes after a 20x-warp cruise and
+    // means nothing to the player)
+    this.missionT += dt;
 
     // --- M10.8c lob boost phase (pad launch, first 60 s) -----------------
     // A real rocket ascent instead of teleporting to 2300 m/s: 900 kN
@@ -788,6 +802,8 @@ export class FlightModel {
           this.note = vsTouch > -30 ? 'LANDED' : 'CRASHED';
           this.apPhase = 'off';
           this.thr = 0;
+          // M11f: freeze the summary numbers
+          this.touchdownVs = vsTouch;
           return;
         }
         const aglS = rS - R_MOON; // sphere-relative AGL (vs profile keying)
@@ -835,6 +851,8 @@ export class FlightModel {
           if (aV > 0) thrust.addScaledVector(upS, aV);
         }
         const tMag = thrust.length();
+        // M11f: descent burn load (the moon has no drag — thrust IS the g load)
+        this.peakG = Math.max(this.peakG, tMag / 9.80665);
         // empty tank = no engine (the burn must not run on fumes)
         if (tMag > 1e-3 && this.prop > 0) {
           const dm = Math.min(this.BURN_RATE * step, this.prop);
@@ -1027,6 +1045,9 @@ export class FlightModel {
         // peak heat drives the glow: normalized 0..1 over ~1 MW/m^2 with
         // a slow cool-down so the plasma persists through the peak region
         this.heat = Math.max(this.heat, clamp(this.heatFlux / 1e6, 0, 1));
+        // M11f: mission summary peaks
+        this.peakG = Math.max(this.peakG, this.gLoad);
+        this.peakHeat = Math.max(this.peakHeat, this.heat);
         // M10.8e entry shake: peak dynamic pressure this step drives the
         // camera rumble (writeCameraOrbital adds the offset). g/10 capped
         // — 5 g+ reads as violent vibration.
@@ -1067,6 +1088,8 @@ export class FlightModel {
       // anything faster is a crash
       this.note = vsTouch > -30 ? 'LANDED' : 'CRASHED';
       this.apPhase = 'off';
+      // M11f: freeze the summary numbers
+      this.touchdownVs = vsTouch;
       // M10.8: clear entry telemetry — otherwise the HUD shows a stale
       // HEAT/g readout forever after touchdown.
       this.heatFlux = 0;
@@ -1076,6 +1099,22 @@ export class FlightModel {
       this.tVs = 0;
       this.tGs = 0;
     }
+  }
+
+  /**
+   * M11f: post-flight summary lines for the HUD (shown while frozen after
+   * a lob / full mission / reentry). Empty until a mission has ended.
+   */
+  missionSummary(): string[] {
+    if (!this.frozen) return [];
+    const mins = Math.floor(this.missionT / 60);
+    const secs = Math.round(this.missionT % 60);
+    const outcome = this.note === 'LANDED' ? 'MISSION COMPLETE' : 'MISSION FAILED';
+    return [
+      `-- ${outcome} (${this.note}) --`,
+      `mission time ${mins}m ${secs.toString().padStart(2, '0')}s  prop remaining ${this.prop.toFixed(0)} kg`,
+      `touchdown ${Math.abs(this.touchdownVs).toFixed(1)} m/s  peak ${this.peakG.toFixed(1)} g  peak heat ${(this.peakHeat * 100).toFixed(0)}%`,
+    ];
   }
 
   /** Camera write for the orbital view: ride slightly behind/above, look
