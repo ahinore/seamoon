@@ -16,6 +16,9 @@ export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.Shader
     uniforms: {
       uSunDir: sunDir,
       uWire: { value: 0 },
+      // M11j: level visualization (?lvl=1) — color tiles by quadtree
+      // level (blue→red ramp) to diagnose LOD coverage questions.
+      uLevelDebug: { value: 0 },
       // M11c: lander floodlight. A camera-anchored point light for the
       // final night-side approach: position/distance/decay follow the
       // standard three.js point-light convention, computed on the CPU
@@ -44,6 +47,7 @@ export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.Shader
     fragmentShader: /* glsl */ `
       uniform vec3 uSunDir;
       uniform float uWire;
+      uniform float uLevelDebug;
       uniform vec3 uLampPos;
       uniform float uLampOn;
       varying vec3 vN;
@@ -68,6 +72,15 @@ export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.Shader
           col += vec3(1.0, 0.96, 0.88) * (ndlLamp * atten * near) * vCol * 6.0;
         }
 
+        // M11j: distance-band debug (?lvl=1) — near ground red, far blue:
+        // answers 'is the descent black band near or far terrain' at a
+        // glance. Skirts (vGrid.z) keep the tint so walls are visible too.
+        if (uLevelDebug > 0.5) {
+          float dist = length(vWorld - cameraPosition);
+          float band = clamp((dist - 5000.0) / 40000.0, 0.0, 1.0);
+          col = mix(vec3(1.0, 0.2, 0.1), vec3(0.1, 0.3, 1.0), band);
+          col *= (0.3 + 0.7 * ndl);
+        }
         // wireframe overlay (same shader-drawn style as the terrain)
         if (uWire > 0.5) {
           float fx = fwidth(vGrid.x) + 1e-6;

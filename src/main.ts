@@ -289,6 +289,10 @@ window.addEventListener('keydown', (e) => {
 if (urlParams.get('wire') === '1') {
   material.uniforms.uWire.value = 1;
 }
+// M11j: ?lvl=1 distance-band debug on the moon material
+if (urlParams.get('lvl') === '1') {
+  moonMaterial.uniforms.uLevelDebug.value = 1;
+}
 
 window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);

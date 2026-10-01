@@ -233,6 +233,16 @@ export function buildTileGeometry(
         colors[ptr] = c[0];
         colors[ptr + 1] = c[1];
         colors[ptr + 2] = c[2];
+      } else {
+        // M11j: skirts used to carry color 0 — from a nadir camera the
+        // M11f inward-tilt exposes the skirt's inner face as a black
+        // ring around every near tile (the descent-camera "black band").
+        // Give skirts the color of their nearest surface vertex (the
+        // clamped lattice corner) so the exposed walls shade like ground.
+        const cS = body.color(hx, hy, hz, h, 0);
+        colors[ptr] = cS[0];
+        colors[ptr + 1] = cS[1];
+        colors[ptr + 2] = cS[2];
       }
       ptr += 3;
       gptr += 3;

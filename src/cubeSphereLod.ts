@@ -52,6 +52,8 @@ export interface LodStats {
   cacheHits: number;
   /** M10.1: tiles finished on the worker (vs synchronous fallback). */
   workerBuilt: number;
+  /** M11j debug: visible tile count per level (index = level). */
+  perLevel?: number[];
 }
 
 interface QNode {
@@ -273,6 +275,7 @@ export class PlanetView {
     this.stats.visibleTiles = 0;
     this.stats.triangles = 0;
     this.stats.maxVisibleLevel = 0;
+    this.stats.perLevel = new Array(21).fill(0);
     for (const r of this.roots) this.visit(r);
 
     this.stats.pending = this.queue.length + this.pool.pending;
@@ -444,6 +447,9 @@ export class PlanetView {
     // M11h: re-attach if the mesh was detached while hidden (see visit())
     if (!t.mesh.parent) this.root.add(t.mesh);
     this.stats.visibleTiles++;
+    if (this.stats.perLevel && node.level < this.stats.perLevel.length) {
+      this.stats.perLevel[node.level]++;
+    }
     this.stats.triangles += t.triangles;
     if (node.level > this.stats.maxVisibleLevel) this.stats.maxVisibleLevel = node.level;
   }
