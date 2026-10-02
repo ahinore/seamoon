@@ -154,13 +154,24 @@ export function makeAtmosphereMesh(planetR: number, uniforms: AtmosphereUniforms
         // transmittance along the view ray
         vec3 T = exp(-totalOd);
         vec3 col = inscatter; // already includes phase * density * sun attenuation
+        // M11n: scene-exposure match. The physically-integrated inscatter
+        // (~0.025 zenith blue in these units) reads near-black next to
+        // sunlit terrain (~0.7). Gain + Reinhard shoulder: zenith lifts to a
+        // visible blue, the bright horizon compresses instead of clipping.
+        col = col * 6.0 / (1.0 + 2.2 * col);
         // night side: fade by sun height at the sample midpoint
         vec3 mid = ro + rd * ((tStart + tEnd) * 0.5);
         float sunH = dot(normalize(mid), uSunDir);
         col *= smoothstep(-0.25, 0.05, sunH);
 
         float alpha = 1.0 - min(min(T.x, T.y), T.z); // how much atmosphere is in front
-        gl_FragColor = vec4(col * 1.0, clamp(alpha * 1.2, 0.0, 1.0));
+        // M11n FIX: unpremultiply — the blend does src*alpha + dst*(1-alpha),
+        // so handing out raw col darkened the sky by exactly alpha (the
+        // zenith read near-black while the horizon was fine). Dividing by
+        // alpha restores the physical inscatter; dst (stars) still shows
+        // through at (1-alpha) = T.
+        float aOut = clamp(alpha * 1.2, 0.0, 1.0);
+        gl_FragColor = vec4(col / max(aOut, 0.02), aOut);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }

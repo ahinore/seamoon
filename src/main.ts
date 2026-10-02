@@ -195,7 +195,11 @@ if (urlParams.get('clouds') === '0') clouds.visible = false;
 if (urlParams.get('nearhull') === '0') clouds.children[0].visible = false;
 if (urlParams.get('farhull') === '0') clouds.children[1].visible = false;
 // Same-session A/B (tools/abshot.mjs): expose the group for toggling.
-if (urlParams.has('abshot')) (window as unknown as { __clouds: unknown }).__clouds = clouds;
+if (urlParams.has('abshot')) {
+  (window as unknown as { __clouds: unknown }).__clouds = clouds;
+  // M11n: expose the cloud uniforms too (uCover sweeps for deck tests)
+  (window as unknown as { __cloudU: unknown }).__cloudU = cloudUniforms;
+}
 // Probe access for tools/reentry.mjs: the flight model (heat, note,
 // phase). Assigned after the FlightModel exists (it's declared at line
 // ~301) — registered via a lazy getter on first frame instead.

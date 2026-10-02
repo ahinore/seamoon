@@ -624,8 +624,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // near view must err toward cloud — from inside/below the
               // deck, under-threshold macro cells read as "the clouds
               // vanished" while the far shell still shows the system.
-              float dShell = smoothstep(macroThrS, macroThrS + 0.16,
-                                        max(sysS, macroThrS - 0.14));
+              // M11n FIX: the old max(sysS, thr-0.14) floor was a NO-OP —
+              // the value was still fed to smoothstep(thr, thr+0.16, ·),
+              // which maps anything below thr to 0. Shift the smoothstep's
+              // lower edge down instead so the bias actually applies.
+              float dShell = smoothstep(macroThrS - 0.14, macroThrS + 0.02,
+                                        sysS);
               d *= pow(dShell, 0.45)
                  * max(smoothstep(0.30, 0.50, weatherMs),
                        0.30 * smoothstep(0.12, 0.30, weatherMs));
