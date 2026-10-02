@@ -140,6 +140,8 @@ export class PlanetView {
   private _far = 1e9;
   /** M11m: camera position in FRAME-RELATIVE space (frustum test only). */
   private _camRel = new THREE.Vector3();
+  /** M11m: camera's true up from its quaternion (stale camera.up workaround). */
+  private _trueUp = new THREE.Vector3();
   // ---- M10.1: async worker pool + motion-lookahead priority ----
   private readonly pool = new TilePool({ maxInFlight: 4 });
   /** ?noworker=1 forces the old synchronous path (A/B diagnosis). */
@@ -283,7 +285,16 @@ export class PlanetView {
     // estimates (absolute tile centers) further down.
     this._camRel.copy(camera.position);
     camera.getWorldDirection(this._fwd);
-    this._right.crossVectors(this._fwd, camera.up).normalize();
+    // M11m FIX 2: derive the basis from the camera's ACTUAL orientation.
+    // camera.up stays (0,1,0) unless someone maintains it — the hover
+    // auto-level and flight model rotate the quaternion only, so building
+    // right/up from the stale camera.up skewed the V side plane by up to
+    // ~50 deg: ground in the lower screen corners failed the V test and
+    // was culled (missing terrain left+right when pitched toward the
+    // horizon). The true up = quaternion * (0,1,0) is orthogonal to fwd
+    // for any roll, giving the exact projection basis.
+    this._trueUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+    this._right.crossVectors(this._fwd, this._trueUp).normalize();
     this._upv.crossVectors(this._right, this._fwd).normalize();
     this._tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5);
     this._tanH = this._tanV * camera.aspect;
@@ -345,24 +356,41 @@ export class PlanetView {
       // M11m: clause-level A/B switches for the culling-eats-near-tiles bug
       // (?nocullside=1 / ?nocullnear=1) — bisects which test mis-culls.
       const oc = this.o as { noCullSide?: boolean; noCullNear?: boolean };
+      // view-space side components (shared by the tests and the dump)
+      const x = ex * this._right.x + ey * this._right.y + ez * this._right.z;
+      const y = ex * this._upv.x + ey * this._upv.y + ez * this._upv.z;
       let culled = false;
       if (oc.noCullNear !== true) culled = z + r < this._near || z - r > this._far;
       if (!culled && oc.noCullSide !== true) {
-        const x = ex * this._right.x + ey * this._right.y + ez * this._right.z;
-        const y = ex * this._upv.x + ey * this._upv.y + ez * this._upv.z;
-        culled = Math.abs(x) - r > z * this._tanH || Math.abs(y) - r > z * this._tanV;
+        // M11m fix 2: the side-plane test omitted the plane-normal factor
+        // sqrt(1+tan²). |x| - r > z*tan treats the sphere radius as if the
+        // plane distance were unnormalized, effectively shrinking r by up
+        // to 43% (tanH 1.03 → factor 1.435) and culling spheres that DO
+        // intersect the frustum — visible as missing terrain at the left/
+        // right screen edges in horizon views (staircase tile edges).
+        // Exact infinite-plane test: inside iff (z*tan - x)/sqrt(1+tan²) > -r.
+        const kH = Math.sqrt(1 + this._tanH * this._tanH);
+        const kV = Math.sqrt(1 + this._tanV * this._tanV);
+        let side = false;
+        if (!(oc as { noCullSideH?: boolean }).noCullSideH) {
+          side = Math.abs(x) - r * kH > z * this._tanH;
+        }
+        if (!side && !(oc as { noCullSideV?: boolean }).noCullSideV) {
+          side = Math.abs(y) - r * kV > z * this._tanV;
+        }
+        culled = side;
       }
       if (culled) {
-        // M11m: optional dump of mis-cull suspects (cullDbg=1): records the
-        // first N culled nodes per update with their test inputs. NEAR only
-        // (< 1500 km) — far-side tiles are legitimately culled.
-        if ((this.o as { cullDbg?: boolean }).cullDbg && this.stats.cullDbg && this.stats.cullDbg.length < 24 && this.sphere.center.distanceTo(this.camPos) < 8e6) {
-          const x = ex * this._right.x + ey * this._right.y + ez * this._right.z;
-          const y = ex * this._upv.x + ey * this._upv.y + ez * this._upv.z;
+        // M11m: optional dump of mis-cull suspects (cullDbg=1). Filter: only
+        // nodes whose center PROJECTS INSIDE the frustum (z>0, |x/z|<tanH,
+        // |y/z|<tanV) — a sphere centered on-screen that still fails the
+        // plane test is a true mis-cull (large sphere poking into view).
+        if ((this.o as { cullDbg?: boolean }).cullDbg && this.stats.cullDbg && this.stats.cullDbg.length < 24 && z > 0
+          && Math.abs(x) < z * this._tanH && Math.abs(y) < z * this._tanV) {
           this.stats.cullDbg.push({
             lvl: node.level, r: +r.toPrecision(4),
             z: +z.toPrecision(4), x: +x.toPrecision(4), y: +y.toPrecision(4),
-            d: +this.sphere.center.distanceTo(this.camPos).toPrecision(5),
+            d: +this.sphere.center.distanceTo(this._camRel).toPrecision(5),
             tanH: +this._tanH.toPrecision(3), tanV: +this._tanV.toPrecision(3),
             near: this._near, far: this._far,
           });
