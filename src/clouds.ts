@@ -719,12 +719,24 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
     `;
   const nearGeo = new THREE.SphereGeometry(planetR + 2600, 128, 96);
   const farGeo = new THREE.SphereGeometry(planetR + Math.max(CLOUD_TOP, 9800), 128, 96);
+  // M11m3 OWNERSHIP FIX: the injections were INVERTED — the near hull
+  // drew the shell map and the far hull the march, so from orbit the SAME
+  // deck painted twice (far hull at R+9.8 km + a copy on the R+2.6 km
+  // hull): a second layer of small clouds below the far deck, moving
+  // with parallax ("snow-like clouds under the far clouds"). Gate each
+  // path by hull identity instead of early-returning (an early return
+  // before wShell would also kill the march that shares the shader):
+  // near hull (uNearHull=1) → march ONLY; far hull (0) → shell ONLY.
   const nearMat = makeMat(1);
   const farMat = makeMat(0);
-  nearMat.fragmentShader = FRAGMENT.replace('float wShell =',
-    'if (uNearHull < 0.5) { gl_FragColor = vec4(0.0); return; }\n      float wShell =');
-  farMat.fragmentShader = FRAGMENT.replace('if (wVol > 0.001) {',
-    'if (uNearHull > 0.5) { gl_FragColor = vec4(0.0); return; }\n      if (wVol > 0.001) {');
+  const gateShell = 'if (wShell > 0.0001 && uNearHull < 0.5) {';
+  const gateVol = 'if (wVol > 0.001 && uNearHull > 0.5) {';
+  nearMat.fragmentShader = FRAGMENT
+    .replace('if (wShell > 0.0001) {', gateShell)
+    .replace('if (wVol > 0.001) {', gateVol);
+  farMat.fragmentShader = FRAGMENT
+    .replace('if (wShell > 0.0001) {', gateShell)
+    .replace('if (wVol > 0.001) {', gateVol);
   const nearMesh = new THREE.Mesh(nearGeo, nearMat);
   const farMesh = new THREE.Mesh(farGeo, farMat);
   // NEAR hull: depth-test OFF. Inside/above the slab the hull fragments
