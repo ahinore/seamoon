@@ -20,6 +20,15 @@ export class CameraRig {
   readonly camera: THREE.PerspectiveCamera;
   mouseLocked = false;
   currentSpeed = 0;
+  /**
+   * M11n3: altitude of the NEAR CLOUD HULL above the surface (earth only,
+   * Infinity elsewhere). The rig's altitude is SEA-LEVEL (terrain included),
+   * so hovering over high terrain put the hull surface (2.6 km - sea-level
+   * altitude) BEHIND the near plane — the whole near-hull cloud layer
+   * clipped away and "no clouds rendered above the horizon when inside or
+   * below the deck". near is capped at 40% of the hull clearance.
+   */
+  nearCapAlt = Infinity;
   speedMultiplier = 1;
   autoLevel = true;
   /** Flight-mode stick deflections (-1..1, spring-centered). FlightModel reads. */
@@ -258,7 +267,11 @@ export class CameraRig {
       this.camera.position.addScaledVector(this.dir.normalize(), speed * dt);
     }
 
-    const near = clamp(alt * 0.2, 0.5, 5e4);
+    // M11n3: near must stay well INSIDE the near cloud hull. nearCapAlt is
+    // the distance to the near-hull surface (2600 m on earth — the hull now
+    // follows the camera); far outside the hull the cap never bites.
+    const hullClear = this.nearCapAlt;
+    const near = clamp(Math.min(alt * 0.2, hullClear * 0.4), 0.5, 5e4);
     if (Math.abs(near - this.camera.near) / near > 0.3) {
       this.camera.near = near;
       this.camera.updateProjectionMatrix();

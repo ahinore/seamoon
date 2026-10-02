@@ -209,6 +209,7 @@ let __flightExposed = false;
 // probe for the below-deck view.
 if (urlParams.get('cloudbg') === '1') cloudUniforms.uCloudDbg.value = 1;
 if (urlParams.get('cloudbg') === '2') cloudUniforms.uCloudDbg.value = 2;
+if (urlParams.get('cloudbg') === '3') cloudUniforms.uCloudDbg.value = 3;
 
 // M10.5: vegetation lighting shares the same sun-direction object as the
 // terrain/atmosphere — trees and ground can never disagree on the light.
@@ -566,9 +567,28 @@ for (let i = 0; i < speedup; i++) {
   atmoUniforms.uCamPos.value.copy(rig.camera.position);
   atmoUniforms.uOrigin.value.copy(world.origin);
   clouds.position.copy(world.origin).negate();
+  // M11n3: the NEAR hull follows the camera. A planet-centered near hull
+  // would not rasterize at all from inside (its fragments vanished while
+  // the same geometry centered on the camera rendered fine — probe aV=4),
+  // which blanked every cloud above the horizon when inside/below the
+  // deck. The shader math is position-independent: ro comes from uCamPos,
+  // and rd = normalize(vWorld - uCamPos) is the fragment direction either
+  // way, so moving the mesh only moves the rasterization footprint.
+  clouds.children[0].position.copy(absCam);
+  // M11n3: draw the near hull AFTER the far hull. Both share renderOrder 4
+  // and the transparent sort can order far-then-near; the far hull's own
+  // alpha=1 debug pixels (and its shell color) would then overwrite the
+  // marched volume and clouds vanished from inside/below the deck.
+  clouds.children[0].renderOrder = 5;
   cloudUniforms.uCamPos.value.copy(rig.camera.position);
   cloudUniforms.uOrigin.value.copy(world.origin);
-  cloudUniforms.uTime.value = performance.now() / 1000;
+  // ?wt=SECONDS: freeze the weather-clock for deterministic cloud A/B
+  // (the field drifts with wall clock; tests must pin it to compare
+  // march vs far shell at the same weather phase).
+  {
+    const wt = urlParams.get('wt');
+    cloudUniforms.uTime.value = wt !== null ? parseFloat(wt) : performance.now() / 1000;
+  }
   cloudUniforms.uTanHalfFov.value = Math.tan(THREE.MathUtils.degToRad(rig.camera.fov) * 0.5);
   cloudUniforms.uViewportH.value = window.innerHeight;
   // Moon orbit: the absolute position is written into the MOON frame center
@@ -592,6 +612,10 @@ for (let i = 0; i < speedup; i++) {
   // to (SOI handoff reference; steers the rig's altitude/zenith). The rule
   // lives in frames.ts (M9.6) — one definition for the whole app.
   nearBody = nearestFrame(absCam);
+  // M11n3: the near cloud hull (R+2.6 km, camera-following) exists around
+  // the EARTH only. The rig caps its near plane at 40% of the hull
+  // clearance so the hull can never fall behind the near plane.
+  rig.nearCapAlt = nearBody === 'moon' ? Infinity : 2600;
   // M11c/M11k lander floodlight: on EITHER body's night side below 60 km
   // AGL the camera carries a warm point light that pools on the terrain
   // ahead — the final approach is otherwise pitch black (the M11c moon

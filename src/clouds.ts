@@ -283,7 +283,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
       // peaks; the weather field gates clusters (systems, not a carpet).
       // windOff: drift in METERS, divided by the cell size here (3000 m) —
       // the SAME physical wind speed the far shell uses (see main()).
-      float cloudDensity(vec3 p, float cover, float weather, vec3 windOff, float edge, float detail) {
+      float cloudDensity(vec3 p, float cover, float weather, vec3 windOff, float edge, float detail, float weatherM2) {
         vec3 pw = p * (1.0 / 3000.0) + windOff * (1.0 / 3000.0); // puff cells ~3 km
         float f1 = fbm3o(pw, detail);
         float billow = 1.0 - abs(2.0 * f1 - 1.0); // rounded blobs [0,1]
@@ -307,8 +307,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // fuzz instead of coherent systems. The wide gate grows proper
         // clusters; below it a thin sparse haze (0.3x) keeps clear skies
         // limited to the genuinely dry weather troughs.
-        float gate = max(smoothstep(0.40, 0.58, weather),
-                         0.30 * smoothstep(0.15, 0.35, weather));
+        // M11n3: gate on the WORSE of the two weather evaluations. The old
+        // fbm4-only gate zeroed the deck's interior whenever the fine
+        // octaves dipped (the far shell — gated on the smooth fbm2 — kept
+        // the same cell cloudy, so the deck showed from orbit but marched
+        // to aV=0 from inside). max() keeps the deck interior present
+        // wherever the SHELL's own gate would keep it.
+        float wx = max(weather, weatherM2);
+        float gate = max(smoothstep(0.40, 0.58, wx),
+                         0.30 * smoothstep(0.15, 0.35, wx));
         d *= gate;
         return d;
       }
@@ -526,6 +533,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         vec3 volCol = vec3(0.0);
         float volT = 1.0; // transmittance
         float dbgT0 = 0.0, dbgSpan = 0.0, dbgSteps = 0.0, dbgMaxD = 0.0;
+        float dbgMacro = 0.0, dbgD = 0.0, dbgWeather = weather, dbgSys = 0.0;
         if (wVol > 0.001) {
           float rB = uPlanetR + ${CLOUD_BOTTOM.toFixed(1)};
           float rT = uPlanetR + ${CLOUD_TOP.toFixed(1)};
@@ -572,6 +580,45 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             // shorter path doubles the effective step density (fewer
             // aliasing artifacts on grazing views).
             t1 = min(t1, t0 + 18000.0);
+            // M11n3 UNIFIED MACRO: evaluate the SHELL's exact system field
+            // at the column midpoint direction (per-fragment is enough: the
+            // 152 km system scale varies ~12% of a cell over the 18 km
+            // path). The old proxy (single 152 km gnoise3 octave, phase
+            // 91.7) was a different field than the far shell's fbm3oLod
+            // sys — from orbit a system read solid while the same column
+            // from inside marched to aV=0 ("no clouds above the horizon
+            // from inside / below the deck"). Same formula, same
+            // thresholds, same octave fade as the shell.
+            vec3 upMid = normalize(ro + rd * (t0 + (t1 - t0) * 0.5));
+            const float cosB2 = 0.8660254, sinB2 = 0.5;
+            vec3 spM = upMid * (uPlanetR + 3000.0);
+            vec3 spMX = vec3(spM.x * cosB2 - spM.z * sinB2, spM.y,
+                             spM.x * sinB2 + spM.z * cosB2);
+            vec3 pwFM = vec3(spMX.x * 0.62, spMX.y * 1.38, spMX.z * 0.62) *
+                        (1.0 / 70000.0) + wind * (1.0 / 70000.0);
+            vec3 pwUM = spM * (1.0 / 70000.0) + wind * (1.0 / 70000.0);
+            float ampSumM;
+            // 512 km gate: match the SHELL's octave fade as seen from orbit
+            // (the deck the user compares against). At the camera altitude
+            // (1-25 km) the 15-70 km octaves would enable, and their noise
+            // swings sysM across the threshold inside a single system cell
+            // — the orbit view (512 km, 15 km octave gated out) shows a
+            // solid deck where the march saw holes. System gate must be
+            // octave-stable and agree with the orbit view's field.
+            float f1m = fbm3oLod(pwFM, pwUM, 512.0, 1.0, ampSumM);
+            f1m /= max(ampSumM, 0.15);
+            float weatherMm = fbm2(upMid * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
+            dbgWeather = weatherMm;
+            float wSysM = 0.62 * smoothstep(0.30, 0.62, weatherMm);
+            float sysM = max(wSysM + 0.38 * f1m * smoothstep(0.30, 0.55, weatherMm),
+                             wSysM - 0.10);
+            dbgSys = sysM;
+            float macroThrM = mix(0.60, 0.50, cover);
+            float macroM = pow(smoothstep(macroThrM, macroThrM + 0.16,
+                                          max(sysM, macroThrM - 0.055)), 0.45)
+                         * max(smoothstep(0.34, 0.55, weatherMm),
+                               0.12 * smoothstep(0.15, 0.35, weatherMm));
+            dbgMacro = macroM;
             float dt = (t1 - t0) / float(steps);
             // Static dither (Interleaved Gradient Noise, Jimenez'): breaks
             // the concentric step-quantization bands of a uniform march.
@@ -594,7 +641,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // sample distance, so the fade is smooth along the ray too.
               float detail = 1.0 / (1.0 + t * (1.0 / 8000.0));
               // ---- unified density: same function the far shell shows ----
-              float d = cloudDensity(p, cover, weather, wind, 0.18, detail);
+              float d = cloudDensity(p, cover, weather, wind, 0.18, detail, weatherMm);
               // PER-SAMPLE macro coupling: evaluate the shell's coverage
               // formula at THIS sample's own direction. The per-fragment
               // dMacro version failed: the gate terms are per-fragment
@@ -604,35 +651,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // deck over the same lat/lon — the LOD mismatch behind both
               // user complaints (pale near clouds / deck vanishing when
               // descending under it).
-              vec3 upS = normalize(p);
-              float weatherMs = fbm2(upS * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
-              // raw billow for the sys texture term (cloudDensity's d is
-              // post-threshold and mostly 0 — the shell's sys blends the
-              // RAW f1, so recompute it here at the same pw scale)
-              // coarse f1 proxy at the shell's 152 km octave scale: the
-              // shell's sys blends its 5-octave fbm (mean 0.5) — using the
-              // near view's 3 km billow (mean 0.19) made the near macro
-              // gate 0.12 stricter than the far one and thinned the deck
-              // 17× (34% far vs 2% near over identical directions).
-              float f1s = 0.5 + gnoise3(upS * (uPlanetR * 6.28318 / 152000.0) + 91.7) * 0.35;
-              float wSysS = 0.62 * smoothstep(0.30, 0.62, weatherMs);
-              float sysS = max(wSysS + 0.38 * f1s * smoothstep(0.30, 0.55, weatherMs),
-                               wSysS - 0.10);
-              float macroThrS = mix(0.60, 0.50, cover);
-              // NEAR-SIDE BIAS: floor sysS 0.14 below the threshold (the
-              // far shell floors 0.055) and soften the weather gate. The
-              // near view must err toward cloud — from inside/below the
-              // deck, under-threshold macro cells read as "the clouds
-              // vanished" while the far shell still shows the system.
-              // M11n FIX: the old max(sysS, thr-0.14) floor was a NO-OP —
-              // the value was still fed to smoothstep(thr, thr+0.16, ·),
-              // which maps anything below thr to 0. Shift the smoothstep's
-              // lower edge down instead so the bias actually applies.
-              float dShell = smoothstep(macroThrS - 0.14, macroThrS + 0.02,
-                                        sysS);
-              d *= pow(dShell, 0.45)
-                 * max(smoothstep(0.30, 0.50, weatherMs),
-                       0.30 * smoothstep(0.12, 0.30, weatherMs));
+              // M11n3: the macro gate is the shell's own field (macroM
+              // above), uniform along the column — the 152 km system scale
+              // cannot change across an 18 km path, and using the shell's
+              // field/thresholds is what makes the inside view agree with
+              // the orbit view.
+              d *= macroM;
+              if (i == 0) dbgD = d;
               // edge erosion: high-frequency wisps carve the surface (fades
               // out with distance so far samples stay smooth); hf cells are
               // 640 m — same physical wind divided by that cell size
@@ -706,6 +731,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         alpha = clamp(alpha, 0.0, 1.0);
         // ?cloudbg=2: march probe — R=aV*4, G=span/18km, B=steps/28,
         // plus dbgMaxD folded into B's fraction. Diagnoses below-deck.
+        if (uCloudDbg > 2.5) {
+          // probe v8: R=macroM, G=sysM, B=weatherMm (fbm2)
+          gl_FragColor = vec4(clamp(dbgMacro, 0.0, 1.0), clamp(dbgSys, 0.0, 1.0), clamp(dbgWeather, 0.0, 1.0), 1.0);
+          #include <colorspace_fragment>
+          return;
+        }
         if (uCloudDbg > 1.5) {
           // probe v6: mesh-masked by B=1: R=aV*4, G=weatherMs at anchor
           gl_FragColor = vec4(clamp(aV * 4.0, 0.0, 1.0), clamp(0.5 + 0.5 * dMacroFrag, 0.0, 1.0), 1.0, 1.0);
