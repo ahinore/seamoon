@@ -374,9 +374,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         vec3 rd = normalize(vWorld - uCamPos);
         float camAlt = length(ro) - uPlanetR;
         vec3 up0 = normalize(ro);
-        // fragment's own altitude within the layer [0..1]
-        float hLayer = clamp((length(vWorld - pc) - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
-                             ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)}, 0.0, 1.0);
+        // (M11n3b: hLayer removed — it fed only the dead inBand term; with
+        // the near hull camera-following its value was direction-dependent
+        // anyway and never meaningful.)
 
         // M10.9: single-owner handoff — the near hull owns the volumetric
         // march, the far hull owns the texture map. Their radii differ
@@ -770,9 +770,11 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // altitude-based opacity fade inside the band (flying through).
         // Floor 0.55 (was 0.35): inside/near the slab the deck used to dim
         // so much that entering the clouds read as them DISAPPEARING.
-        float inBand = smoothstep(0.0, 0.25, hLayer) * (1.0 - smoothstep(0.75, 1.0, hLayer));
+        // (M11n3b cleanup: the old inBand term was dead code —
+        // farFade*inBand + farFade*(1-inBand) == farFade — and hLayer fed
+        // only that; removed. bandFade is purely the camera-altitude ramp.)
         float farFade = clamp(abs(camAlt - ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)}) / 6000.0, 0.0, 1.0);
-        float bandFade = mix(0.55, 0.95, farFade * inBand + farFade * (1.0 - inBand));
+        float bandFade = mix(0.55, 0.95, farFade);
         alpha *= mix(bandFade, 1.0, step(8000.0, camAlt));
         alpha = clamp(alpha, 0.0, 1.0);
         // ?cloudbg=2: march probe — R=aV*4, G=span/18km, B=steps/28,
