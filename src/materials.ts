@@ -161,6 +161,30 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
         // per-vertex terrain color (sRGB-ish values authored in linear space)
         vec3 col = vCol * (0.10 + 0.90 * ndl * cShadow);
 
+        // M11n5: night-side city lights — procedural population clusters.
+        // Two coarse fbm gates (~1000 km habitable regions, ~130 km metro
+        // areas) and a fine speckle octave (~3 km light points), modulated
+        // by a mid-latitude population band. Warm sodium-orange glow, only
+        // where the sun is below the horizon.
+        {
+          vec3 upN = normalize(vWorld + uOrigin);
+          float sunHf = dot(upN, uSunDir);
+          float night = smoothstep(0.06, -0.04, sunHf);
+          if (night > 0.001) {
+            vec3 absP = vWorld + uOrigin;
+            float cl1 = cwfbm2(absP * (1.0 / 900000.0));
+            float cl2 = cwfbm2(absP * (1.0 / 120000.0) + vec3(7.31, 2.9, 5.13));
+            float latDeg = asin(clamp(upN.y, -1.0, 1.0)) * 57.29578;
+            float popBand = 0.35 + 0.65 * exp(-pow((latDeg - 30.0) / 38.0, 2.0));
+            float pop = smoothstep(0.46, 0.68, cl1) * smoothstep(0.40, 0.62, cl2) * popBand;
+            if (pop > 0.001) {
+              float sp = cwfbm2(absP * (1.0 / 800.0) + vec3(3.7, 9.1, 1.3));
+              float lights = pop * smoothstep(0.46, 0.72, sp);
+              col += vec3(1.0, 0.84, 0.55) * lights * night * 1.7;
+            }
+          }
+        }
+
         // M11k: lander floodlight pool — the same inverse-square warm
         // point light the moon material carries, for night-side landings
         // on EARTH (the return mission touches down on the planet's
