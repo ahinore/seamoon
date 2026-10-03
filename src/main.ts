@@ -187,6 +187,17 @@ if (urlParams.get('atmo') === '0') atmosphere.visible = false;
 // Phase 8: cloud shell (same inverted-hull pattern; ?clouds=0 disables).
 const cloudUniforms = makeCloudUniforms(R);
 cloudUniforms.uSunDir = atmoUniforms.uSunDir; // share the sun object
+// M11n4 cloud shadows: terrain/sea evaluate the deck's MACRO weather field —
+// share the coverage uniform and the (wt-freezable) weather clock so the
+// shadows always agree with the visible deck's weather phase.
+material.uniforms.uCover = cloudUniforms.uCover;
+material.uniforms.uTime = cloudUniforms.uTime;
+seaMaterial.uniforms.uCover = cloudUniforms.uCover;
+seaMaterial.uniforms.uWTime = cloudUniforms.uTime;
+if (urlParams.get('cloudshadow') === '0') {
+  material.uniforms.uCloudShadow.value = 0;
+  seaMaterial.uniforms.uCloudShadow.value = 0;
+}
 const clouds = makeCloudMesh(R, cloudUniforms);
 scene.add(clouds);
 if (urlParams.get('clouds') === '0') clouds.visible = false;

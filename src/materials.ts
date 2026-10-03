@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { cloudWeatherGLSL } from './clouds';
 
 /**
  * Planet material: single color + Lambert term against a fixed sun direction.
@@ -34,6 +35,12 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       // (the return mission's touchdown is on the planet's night side).
       uLampPos: { value: new THREE.Vector3() },
       uLampOn: { value: 0 },
+      // M11n4: cloud shadows — uTime drives the deck's weather drift, uCover
+      // is SHARED with the cloud hulls by main.ts (one coverage source),
+      // uCloudShadow = 0 disables (?cloudshadow=0 A/B).
+      uTime: { value: 0 },
+      uCover: { value: 0.42 },
+      uCloudShadow: { value: 1 },
     },
     vertexShader: /* glsl */ `
       #include <common>
@@ -71,6 +78,9 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       uniform float uDetail;
       uniform vec3 uLampPos;
       uniform float uLampOn;
+      uniform float uTime;
+      uniform float uCover;
+      uniform float uCloudShadow;
       varying vec3 vN;
       varying vec3 vC;
       varying vec3 vGrid;
@@ -113,11 +123,43 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
           f.z);
       }
 
+      ${cloudWeatherGLSL('cw')}
       void main() {
         // wrapped Lambert: soft terminator instead of a hard day/night cut
         float ndl = clamp((dot(normalize(vN), uSunDir) + 0.18) / 1.18, 0.0, 1.0);
+        // M11n4: cloud shadows — evaluate the deck's MACRO weather (the same
+        // fbm2 field and gate the far shell draws) at the sun ray's
+        // slab-midpoint crossing, and dim the DIRECT sun term under it. The
+        // 0.10 ambient floor keeps shadows readable; the fbm texture inside
+        // systems is not shadowed (system-scale shadows only).
+        float cShadow = 1.0;
+        if (uCloudShadow > 0.5) {
+          vec3 sro = vWorld + uOrigin;      // surface point, planet frame
+          float rMid2 = uPlanetR + 3000.0;
+          float sb = dot(sro, uSunDir);
+          float sc = dot(sro, sro) - rMid2 * rMid2;
+          float shq = sb * sb - sc;
+          if (shq > 0.0) {
+            float st = (-sb - sqrt(shq)) > 0.0 ? (-sb - sqrt(shq)) : (-sb + sqrt(shq));
+            if (st > 0.0) {
+              vec3 upW = normalize(sro + uSunDir * st);
+              float wTime = uTime * 2e-5;
+              float weatherM = cwfbm2(upW * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
+              float latS = asin(clamp(upW.y, -1.0, 1.0));
+              float bandsS = 0.55 + 0.45 * cos(latS * 6.0) * 0.5
+                           + 0.25 * exp(-pow((abs(latS) - 0.15) * 3.0, 2.0));
+              float coverS = clamp(uCover * bandsS * 1.6 * weatherM + (weatherM - 0.5) * 0.4, 0.0, 1.0);
+              coverS = pow(coverS, 0.7);
+              float gateS = max(smoothstep(0.34, 0.55, weatherM),
+                                0.12 * smoothstep(0.15, 0.35, weatherM));
+              float deck = pow(smoothstep(0.34, 0.55, weatherM), 0.45) * gateS
+                         * clamp(coverS * 1.6, 0.0, 1.0);
+              cShadow = 1.0 - 0.72 * clamp(deck, 0.0, 1.0);
+            }
+          }
+        }
         // per-vertex terrain color (sRGB-ish values authored in linear space)
-        vec3 col = vCol * (0.10 + 0.90 * ndl);
+        vec3 col = vCol * (0.10 + 0.90 * ndl * cShadow);
 
         // M11k: lander floodlight pool — the same inverse-square warm
         // point light the moon material carries, for night-side landings
@@ -252,6 +294,12 @@ export function makeSeaMaterial(shared: {
       uHR: shared.uHR,
       uHM: shared.uHM,
       uTime: { value: 0 },
+      // M11n4: cloud shadows — uWTime is the WEATHER clock (shared with the
+      // cloud hulls by main.ts; uTime here is the real-time wave clock),
+      // uCover shared with the cloud hulls, uCloudShadow A/B switch.
+      uWTime: { value: 0 },
+      uCover: { value: 0.42 },
+      uCloudShadow: { value: 1 },
       uWire: { value: 0 },
       uFovTan: { value: Math.tan(THREE.MathUtils.degToRad(60) * 0.5) },
       uViewportH: { value: 1000 },
@@ -295,6 +343,9 @@ export function makeSeaMaterial(shared: {
       uniform float uHR;
       uniform float uHM;
       uniform float uTime;
+      uniform float uWTime;
+      uniform float uCover;
+      uniform float uCloudShadow;
       uniform float uWire;
       uniform float uToneMap;
       varying vec3 vN;
@@ -325,6 +376,37 @@ export function makeSeaMaterial(shared: {
         return normalize(n - t * st * 0.35 - b * sb * 0.35);
       }
 
+      ${cloudWeatherGLSL('cw')}
+      // M11n4: cloud shadow — same macro-deck evaluation as the terrain
+      // shader (see makePlanetMaterial's cShadow block for the derivation).
+      float cloudShadow(vec3 sroV, vec3 origin, float planetR, float time, float cover) {
+        float cShadow = 1.0;
+        vec3 sro = sroV + origin;
+        float rMid2 = planetR + 3000.0;
+        float sb = dot(sro, uSunDir);
+        float sc = dot(sro, sro) - rMid2 * rMid2;
+        float shq = sb * sb - sc;
+        if (shq > 0.0) {
+          float st = (-sb - sqrt(shq)) > 0.0 ? (-sb - sqrt(shq)) : (-sb + sqrt(shq));
+          if (st > 0.0) {
+            vec3 upW = normalize(sro + uSunDir * st);
+            float wTime = time * 2e-5;
+            float weatherM = cwfbm2(upW * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
+            float latS = asin(clamp(upW.y, -1.0, 1.0));
+            float bandsS = 0.55 + 0.45 * cos(latS * 6.0) * 0.5
+                         + 0.25 * exp(-pow((abs(latS) - 0.15) * 3.0, 2.0));
+            float coverS = clamp(cover * bandsS * 1.6 * weatherM + (weatherM - 0.5) * 0.4, 0.0, 1.0);
+            coverS = pow(coverS, 0.7);
+            float gateS = max(smoothstep(0.34, 0.55, weatherM),
+                              0.12 * smoothstep(0.15, 0.35, weatherM));
+            float deck = pow(smoothstep(0.34, 0.55, weatherM), 0.45) * gateS
+                       * clamp(coverS * 1.6, 0.0, 1.0);
+            cShadow = 1.0 - 0.72 * clamp(deck, 0.0, 1.0);
+          }
+        }
+        return cShadow;
+      }
+
       void main() {
         vec3 V = normalize(uCamPos - vWorld);
         vec3 N0 = normalize(vN);
@@ -353,7 +435,10 @@ export function makeSeaMaterial(shared: {
 
         // ---- lighting ----
         float ndl = clamp(dot(N0, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
-        vec3 col = body * (0.08 + 0.92 * ndl);
+        // M11n4: cloud shadow — dims the direct sun term AND the sun glint
+        float cShadow = uCloudShadow > 0.5
+          ? cloudShadow(vWorld, uOrigin, uPlanetR, uWTime, uCover) : 1.0;
+        vec3 col = body * (0.08 + 0.92 * ndl * cShadow);
 
         // Fresnel: sky reflection stronger at grazing angles
         float fres = 0.02 + 0.98 * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);
@@ -368,7 +453,7 @@ export function makeSeaMaterial(shared: {
         // tone-map the glint (smooth cap) instead of a hard clamp: keeps a
         // bright hotspot without blowing out to white streaks
         float glint = 1.0 - exp(-d * fres * 0.12);
-        col += vec3(1.0, 0.95, 0.85) * glint * clamp(dot(N0, uSunDir) + 0.3, 0.0, 1.0);
+        col += vec3(1.0, 0.95, 0.85) * glint * cShadow * clamp(dot(N0, uSunDir) + 0.3, 0.0, 1.0);
 
         // ---- foam near the shore (depth < ~3 m) ----
         float foamBand = 1.0 - smoothstep(0.5, 3.5, vDepth);

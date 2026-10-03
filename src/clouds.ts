@@ -38,6 +38,54 @@ export interface CloudUniforms {
   uCloudDbg: { value: number }; // 1 = color-code deck suppression sources
 }
 
+/**
+ * Shared weather-field GLSL: the deck's MACRO weather (fbm2 over gradient
+ * noise) as a drop-in snippet for OTHER shaders. M11n4 cloud shadows use it
+ * in the terrain/sea shaders to evaluate the same system layout the cloud
+ * hulls draw (sun-ray slab crossing → weatherM → deck presence), so shadows
+ * line up with the visible deck without marching.
+ *
+ * Parameterized by a function-name prefix: consumers may already define
+ * hash13 (the terrain shader's vnoise does) — 'cw' keeps the copies distinct
+ * (cwfbm2 etc.).
+ */
+export const cloudWeatherGLSL = (p: string): string => /* glsl */ `
+      float ${p}hash13(vec3 p3) {
+        p3 = fract(p3 * 0.1031);
+        p3 += dot(p3, p3.zyx + 31.32);
+        return fract((p3.x + p3.y) * p3.z);
+      }
+      float ${p}gdot(float cx, float cy, float cz, float dx, float dy, float dz) {
+        float z2 = ${p}hash13(vec3(cx, cy, cz)) * 2.0 - 1.0;
+        float az = ${p}hash13(vec3(cx + 19.19, cy + 19.19, cz + 19.19)) * 6.2831853;
+        float r2 = sqrt(max(0.0, 1.0 - z2 * z2));
+        return (r2 * cos(az)) * dx + (r2 * sin(az)) * dy + z2 * dz;
+      }
+      float ${p}gnoise3(vec3 x) {
+        x = mod(x, 2048.0);
+        vec3 i = floor(x);
+        vec3 f = x - i;
+        vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+        vec3 i1 = mod(i + 1.0, 2048.0);
+        float n000 = ${p}gdot(i.x, i.y, i.z,   f.x,     f.y,     f.z);
+        float n100 = ${p}gdot(i1.x, i.y, i.z, f.x-1.0, f.y,     f.z);
+        float n010 = ${p}gdot(i.x, i1.y, i.z, f.x,     f.y-1.0, f.z);
+        float n110 = ${p}gdot(i1.x, i1.y, i.z, f.x-1.0, f.y-1.0, f.z);
+        float n001 = ${p}gdot(i.x, i.y, i1.z, f.x,     f.y,     f.z-1.0);
+        float n101 = ${p}gdot(i1.x, i.y, i1.z, f.x-1.0, f.y,     f.z-1.0);
+        float n011 = ${p}gdot(i.x, i1.y, i1.z, f.x,     f.y-1.0, f.z-1.0);
+        float n111 = ${p}gdot(i1.x, i1.y, i1.z, f.x-1.0, f.y-1.0, f.z-1.0);
+        return mix(
+          mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+          mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y),
+          u.z) * 1.15;
+      }
+      float ${p}fbm2(vec3 pw) {
+        return 0.6 * (0.5 + ${p}gnoise3(pw) * 1.1)
+             + 0.3 * (0.5 + ${p}gnoise3(pw * 2.13) * 1.1) + 0.05;
+      }
+`;
+
 export function makeCloudUniforms(planetR: number): CloudUniforms {
   return {
     uSunDir: { value: new THREE.Vector3(1, 0.3, 0.35).normalize() },
