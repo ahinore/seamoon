@@ -91,6 +91,15 @@ export class AutoPilot {
       this.alt0 = alt;
       this.alt1 = alt;
     }
+    // M11n3b review fix: ?alt is authoritative in EVERY spawn mode. The old
+    // demo-gated reassignment above silently ignored ?alt otherwise —
+    // ?body=moon&alt=3000 spawned at the historical 25 Mm sphere-rail
+    // altitude (the moon view rendered an all-black frame and the black-band
+    // review could not even reproduce the horizon). Only alt0 is overridden:
+    // drop/bounce keep their explicit/default alt1 (drop target) untouched.
+    if (q.has('alt') && !q.has('alt0')) {
+      this.alt0 = num(q, 'alt', this.alt0);
+    }
     this.world = world;
     // ?moonangle=<deg> freezes the moon at an orbit angle (testing): the
     // main loop skips its time-based update when this is present.

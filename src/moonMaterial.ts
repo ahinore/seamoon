@@ -13,6 +13,9 @@ import * as THREE from 'three';
  */
 export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
+    // M11n3b: DoubleSide — grazing horizon views see slope BACKSIDES; with
+    // the default FrontSide they cull to holes (see fragment comment).
+    side: THREE.DoubleSide,
     uniforms: {
       uSunDir: sunDir,
       uWire: { value: 0 },
@@ -55,8 +58,15 @@ export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.Shader
       varying vec3 vCol;
       varying vec3 vWorld;
       void main() {
+        // M11n3b: two-sided moon surface. At the 2 km-altitude horizon the
+        // view grazes the relief — whole slope backsides faced the camera
+        // and FrontSide culling turned them into HOLES (bare background
+        // through the horizon band, the moon black-band speckle). Render
+        // both faces and light the back face with its flipped normal: the
+        // band fills with plausibly-lit terrain instead of sky.
+        vec3 N = gl_FrontFacing ? vN : -vN;
         // wrapped Lambert: regolith scatters a little past the terminator
-        float ndl = clamp((dot(normalize(vN), uSunDir) + 0.12) / 1.12, 0.0, 1.0);
+        float ndl = clamp((dot(N, uSunDir) + 0.12) / 1.12, 0.0, 1.0);
         // regolith is dark: albedo ~0.12, so cap diffuse well below white
         vec3 col = vCol * (0.035 + 0.965 * ndl) * 0.95;
 
@@ -66,7 +76,7 @@ export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.Shader
           vec3 toLamp = uLampPos - vWorld;
           float d2 = max(dot(toLamp, toLamp), 4.0);
           float atten = min(uLampOn * 3.0e4 / d2, 30.0);
-          float ndlLamp = clamp(dot(normalize(vN), normalize(toLamp)), 0.0, 1.0);
+          float ndlLamp = clamp(dot(N, normalize(toLamp)), 0.0, 1.0);
           // soft near cut so the pool doesn't blow out right under the craft
           float near = smoothstep(1.5, 5.0, sqrt(d2));
           col += vec3(1.0, 0.96, 0.88) * (ndlLamp * atten * near) * vCol * 6.0;

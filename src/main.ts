@@ -226,7 +226,11 @@ const moonView = new PlanetView(scene, R_MOON, moonMaterial, {
   maxLevel: 20,
   tauPx: 2,
   res: 65,
-  cacheSize: 300,
+  // M11n3b: 300 starved the SURFACE-view horizon ring — from 2 km the
+  // quadtree wants ~700 visible tiles (center L12 + the grazing horizon
+  // ring to L13+), so the far tiles lost the build/evict race and the
+  // horizon band rendered as bare background (the moon black band).
+  cacheSize: 900,
   }, MOON_BODY);
 if (urlParams.get('moon') === '0') moonView.root.visible = false;
 // sim clock for the orbit (performance.now-based; deterministic per session)
