@@ -642,15 +642,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               float detail = 1.0 / (1.0 + t * (1.0 / 8000.0));
               // ---- unified density: same function the far shell shows ----
               float d = cloudDensity(p, cover, weather, wind, 0.18, detail, weatherMm);
-              // PER-SAMPLE macro coupling: evaluate the shell's coverage
-              // formula at THIS sample's own direction. The per-fragment
-              // dMacro version failed: the gate terms are per-fragment
-              // constants that measured a different weather cell than the
-              // column being marched, capping the whole near deck at a
-              // uniform aV≈0.2 (probe) while the far shell showed 87%
-              // deck over the same lat/lon — the LOD mismatch behind both
-              // user complaints (pale near clouds / deck vanishing when
-              // descending under it).
+              // M11n3 macro coupling: the gate is macroM, evaluated ONCE per
+              // fragment at the column midpoint (above). The older schemes
+              // both failed: per-fragment constants measured a different
+              // weather cell than the column (capped the whole deck at
+              // aV≈0.2), and the per-sample proxy field disagreed with the
+              // shell's field so the deck vanished from inside while the
+              // orbit view showed it solid.
               // M11n3: the macro gate is the shell's own field (macroM
               // above), uniform along the column — the 152 km system scale
               // cannot change across an 18 km path, and using the shell's
@@ -785,7 +783,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
   nearMat.depthTest = false;
   nearMesh.frustumCulled = false;
   farMesh.frustumCulled = false;
-  nearMesh.renderOrder = 4; // before the atmosphere shell (5), after sea (1)
+  nearMesh.renderOrder = 5; // M11n3: after the far hull (4) so the far shell can never overwrite the march; ties the atmosphere (5), sorted nearer-last
   farMesh.renderOrder = 4;
   const group = new THREE.Group();
   group.add(nearMesh);

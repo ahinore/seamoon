@@ -267,11 +267,16 @@ export class CameraRig {
       this.camera.position.addScaledVector(this.dir.normalize(), speed * dt);
     }
 
-    // M11n3: near must stay well INSIDE the near cloud hull. nearCapAlt is
-    // the distance to the near-hull surface (2600 m on earth — the hull now
-    // follows the camera); far outside the hull the cap never bites.
-    const hullClear = this.nearCapAlt;
-    const near = clamp(Math.min(alt * 0.2, hullClear * 0.4), 0.5, 5e4);
+    // M11n3: near must stay well INSIDE the near cloud hull while the hull
+    // paints (the march lives below ~25 km altitude; the hull follows the
+    // camera so its FOV-edge fragments sit ~1.8 km out and a larger near
+    // plane would clip them). ABOVE the march band the hull paints nothing
+    // (alpha 0), so the cap lifts and the altitude-adaptive near keeps the
+    // old depth precision at altitude — a fixed 1 km near at orbital
+    // distances degrades sea/terrain depth separation ~50x (z-fight risk
+    // on the co-planar limb at spawn).
+    const nearCap = alt < 26000 ? this.nearCapAlt * 0.4 : Infinity;
+    const near = clamp(Math.min(alt * 0.2, nearCap), 0.5, 5e4);
     if (Math.abs(near - this.camera.near) / near > 0.3) {
       this.camera.near = near;
       this.camera.updateProjectionMatrix();
