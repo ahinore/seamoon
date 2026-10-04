@@ -347,14 +347,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // full layer (the "clouds vanish / near clouds pale" handoff).
         // mix(0.55,0.30,cover) + (0.72+0.28*cover): top ~15-45% — dense
         // enough to match the far map, still puff-shaped.
-        // M11n6: the 15-30% puff coverage was the "clouds disappear when
-        // looking up" root cause — a vertical ray crosses only ~1 puff cell
-        // (3 km) so 70-85% of zenith columns saw a GAP while the orbit view
-        // showed a 40-60% deck (the shell thresholds sys, not billow).
-        // thr lowered to mix(0.38,0.20,cover) → ~45-60% coverage, matching
-        // the far map; the grazing band was already saturated and the
-        // light-march threshold follows below.
-        float thr = mix(0.38, 0.20, cover);
+        // M11n7 ACE-COMBAT-STYLE DECK: discrete clouds with ground gaps.
+        // The previous mix(0.38,0.20) + the soft 0.18 edge made the deck
+        // read as a continuous sheet covering the whole ground (user
+        // report). thr raised to mix(0.45,0.30,cover) → ~35-40% coverage,
+        // and the march passes a sharper edge (0.10) so puffs read as
+        // distinct bodies with visible ground between them.
+        float thr = mix(0.50, 0.36, cover);
         float d = smoothstep(thr, thr + edge, billow * (0.72 + 0.28 * cover));
         d = clamp(d * 1.35, 0.0, 1.0);
         // Cluster gate: the old smoothstep(0.42,0.62) was so tight that only
@@ -547,12 +546,14 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // organized lace of circles ("noise when approaching"). The far
           // map thresholds the RAW fbm instead — organic system shapes.
           // sys distribution (gradient-noise fbm, 30k sphere samples):
-          // mean 0.499, std 0.180. thr picks q55-q72 → 28-45% pre-gate.
-          float thr = mix(0.60, 0.50, cover);
+          // mean 0.499, std 0.180. thr picks q70-q78 → ~33-40% coverage —
+          // M11n7: discrete deck with ground gaps (Ace-Combat-style), was
+          // q55-q72 (50-60% coverage — a continuous sheet from 20-25 km).
+          float thr = mix(0.63, 0.56, cover);
           // DIP FLOOR: cloudbg proved the dot holes are sys dips below thr
           // (red class). Shallow dips (the lattice-minima speckle) close by
           // flooring the input 0.055 below thr — deep system gaps survive.
-          float d = smoothstep(thr, thr + 0.16, max(sys, thr - 0.055));
+          float d = smoothstep(thr, thr + 0.10, max(sys, thr - 0.055));
           d = pow(d, 0.45); // saturate interior: translucent gray dots close
           // SINGLE soft gain: the double clamp (1.35 then 1.5) forced the
           // deck to binary alpha — during approach every edge pixel flipped
@@ -727,7 +728,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // sample distance, so the fade is smooth along the ray too.
               float detail = 1.0 / (1.0 + t * (1.0 / 8000.0));
               // ---- unified density: same function the far shell shows ----
-              float d = cloudDensity(p, cover, weather, wind, 0.18, detail, weatherMm);
+              // M11n7: sharper edge (0.10) — discrete puff bodies instead
+              // of a soft continuous sheet
+              float d = cloudDensity(p, cover, weather, wind, 0.10, detail, weatherMm);
               // M11n3 macro coupling: the gate is macroM, evaluated ONCE per
               // fragment at the column midpoint (above). The older schemes
               // both failed: per-fragment constants measured a different
@@ -771,8 +774,8 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                   vec3 pl = p + uSunDir * (float(j) * 220.0);
                   float fl = fbm3o(pl * (1.0 / 3000.0) + wind * (1.0 / 3000.0), 1.0);
                   float bl = 1.0 - abs(2.0 * fl - 1.0);
-                  // same threshold family as cloudDensity (M11n6: mix(0.38,0.20)):
-                  float thrS = mix(0.38, 0.20, cover);
+                  // same threshold family as cloudDensity (M11n7: mix(0.45,0.30)):
+                  float thrS = mix(0.45, 0.30, cover);
                   od += smoothstep(thrS, thrS + 0.18, bl * (0.72 + 0.28 * cover)) * 220.0;
                 }
                 float shadow = exp(-od * 0.0008);     // Beer-Lambert, gentler:
