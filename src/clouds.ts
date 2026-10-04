@@ -555,6 +555,11 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // as the march's macroM — orbit and ground must agree.
           gate = max(gate, 0.16);
           d *= gate;
+          // M11n6b: the shell's sparse fair-weather puffs (sys top peaks) —
+          // matches the march's 3 km sparse puffs so dry cells read as
+          // scattered cumulus from orbit AND from the ground.
+          float sparseS = smoothstep(0.78, 0.92, sys);
+          d = max(d, sparseS * 0.35);
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // ---- DEBUG (?cloudbg=1): color-code what suppresses the deck --
           // RED   = sys below threshold (fbm/anchor dips: lattice holes)
@@ -728,6 +733,16 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // the orbit view.
               d *= macroM;
               if (i == 0) dbgD = d;
+              // M11n6b: sparse fair-weather puffs — the density floors only
+              // guarantee PRESENCE at ~0.02 density (an invisible haze); the
+              // billow PEAKS (top ~12% of the field) instead render as
+              // distinct opaque puffs, so a dry cell reads as scattered
+              // fair-weather cumulus instead of "clouds disappeared".
+              // Applied AFTER the macroM multiply so the sparse puffs keep
+              // their opacity regardless of the dry-cell gate floor.
+              float flS = fbm3o(p * (1.0 / 3000.0) + wind * (1.0 / 3000.0), detail);
+              float sparse = smoothstep(0.62, 0.80, 1.0 - abs(2.0 * flS - 1.0));
+              d = max(d, sparse * 0.5);
               // edge erosion: high-frequency wisps carve the surface (fades
               // out with distance so far samples stay smooth); hf cells are
               // 640 m — same physical wind divided by that cell size
