@@ -376,6 +376,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                          0.30 * smoothstep(0.15, 0.35, wx));
         gate = max(gate, 0.14);
         d *= gate;
+        // M11n8 CLUMP BREAKER: the puff field's correlation length (14 km
+        // fbm octave) made clouds clump into 10-30 km sheets — from 20 km
+        // altitude the whole view sat inside one clump and the deck read
+        // as a 100% cover sheet (user report). A 1.5 km fine mask breaks
+        // every clump into discrete 1-3 km clouds with real ground gaps
+        // between them (Ace-Combat-style). The far shell applies the same
+        // fine field at the same slab positions, so orbit and ground agree.
+        float fine = noise3(p * (1.0 / 1500.0) + windOff * (1.0 / 1500.0));
+        d *= smoothstep(0.46, 0.55, fine);
         return d;
       }
 
@@ -570,6 +579,14 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // scattered cumulus from orbit AND from the ground.
           float sparseS = smoothstep(0.78, 0.92, sys);
           d = max(d, sparseS * 0.35);
+          // M11n8 CLUMP BREAKER: the same 1.5 km fine mask the march's
+          // cloudDensity applies, evaluated at the slab-midpoint position —
+          // breaks the shell's 15-330 km sheets into discrete 1-3 km
+          // clouds with ground gaps (matches the march's clump positions,
+          // so the 18-25 km handoff stays seamless).
+          float fineS = noise3(upW * (uPlanetR + 3000.0) * (1.0 / 1500.0)
+                               + wind * (1.0 / 1500.0));
+          d *= smoothstep(0.46, 0.55, fineS);
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // ---- DEBUG (?cloudbg=1): color-code what suppresses the deck --
           // RED   = sys below threshold (fbm/anchor dips: lattice holes)
