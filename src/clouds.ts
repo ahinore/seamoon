@@ -364,14 +364,34 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         float towerN = noise3(p * (1.0 / 9000.0) + windOff * (1.0 / 9000.0));
         float tower = smoothstep(0.55, 0.72, towerN);
         // vertical profile in slab units: hE 0 = 1.8 km base, 1 = 4.2 km
-        // (the old deck top), 4.3 = ~12 km (tower top)
+        // (the old deck top), 4.3 = ~12 km (tower top).
+        // M11n9b: the base deck fades 0.70-2.2 (up to ~7 km) instead of
+        // hard-stopping at 1.1 — horizon rays from 8-11 km sample the field
+        // FAR away where the ray altitude is 6-11 km; with the old 1.1 cap
+        // every horizon sample was outside the deck and the horizon
+        // atmosphere band showed no clouds at all (user report).
         float hE = (length(p) - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
                    ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)};
-        float vertBase = smoothstep(0.0, 0.10, hE) * (1.0 - smoothstep(0.70, 1.10, hE));
+        float vertBase = smoothstep(0.0, 0.10, hE) * (1.0 - smoothstep(0.70, 2.20, hE));
         float vertTower = smoothstep(0.0, 0.30, hE) * (1.0 - smoothstep(3.20, 4.40, hE));
         float vert = max(vertBase, vertTower * tower);
         d *= region * mix(0.55, 1.0, body) * vert;
         return d;
+      }
+      // M11n9b v10 probe: diagnose each gate layer for the horizon band
+      float cloudGateDebug(vec3 p, float cover, float weather, vec3 windOff, float weatherM2, out float oRegion, out float oBody, out float oVert) {
+        float regionN = noise3(p * (1.0 / 60000.0) + windOff * (1.0 / 60000.0));
+        oRegion = smoothstep(0.50, 0.60, regionN);
+        float bodyN = noise3(p * (1.0 / 4000.0) + windOff * (1.0 / 4000.0));
+        oBody = smoothstep(0.44, 0.56, bodyN);
+        float hE = (length(p) - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
+                   ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)};
+        float vertBase = smoothstep(0.0, 0.10, hE) * (1.0 - smoothstep(0.70, 2.20, hE));
+        float vertTower = smoothstep(0.0, 0.30, hE) * (1.0 - smoothstep(3.20, 4.40, hE));
+        float towerN = noise3(p * (1.0 / 9000.0) + windOff * (1.0 / 9000.0));
+        float tower = smoothstep(0.55, 0.72, towerN);
+        oVert = max(vertBase, vertTower * tower);
+        return oRegion * mix(0.55, 1.0, oBody) * oVert;
       }
       // M11n9: the extended slab-unit height (0 = base … 4.3 = tower top),
       // exposed for the march's ambient term
@@ -399,7 +419,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // the volumetric deck at R+2.6 km, so in the overlap band the same
         // cloud system appeared TWICE with parallax (the "second, different
         // cloud layer below the far clouds").
-        float wVol = (1.0 - smoothstep(18000.0, 25000.0, camAlt)) * step(0.001, uVolSteps);
+        // M11n9b: the handoff moved DOWN to the tower tops. wVol now fades
+        // 8-12 km (the tower band) and wShell takes over above 12 km —
+        // at 11 km looking at the horizon the old gates left a dead band:
+        // the march faded out, the shell hadn't started, and the horizon
+        // atmosphere band showed no clouds at all (user report).
+        float wVol = (1.0 - smoothstep(8000.0, 12000.0, camAlt)) * step(0.001, uVolSteps);
 
         // ---------------- weather / coverage ----------------
         vec3 upF = normalize(vWorld - pc);
@@ -477,7 +502,10 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // cloud coverage never dips (the gap the user saw at 48-60 km).
         // Both evaluate the SAME density field at the slab middle, so the
         // handoff just swaps WHO draws the same clouds.
-        float wShell = (1.0 - wVol) * smoothstep(8000.0, 25000.0, camAlt);
+        // M11n9b: the shell starts at the TOWER TOPS (12 km) — its geometry
+        // sits at 12 km now, so painting from 8 km up (overlapping the
+        // march's fade) keeps the horizon band populated at every altitude
+        float wShell = (1.0 - wVol) * smoothstep(8000.0, 14000.0, camAlt);
         vec3 shellCol = vec3(0.0);
         float shellA = 0.0;
         if (wShell > 0.0001) {
@@ -645,7 +673,14 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             // ...and only if that closest approach lies AHEAD of the camera
             // (t = -dot(ro,rd) > 0). For up-looking rays the line's perigee
             // is behind the camera — the ray climbs away and never dips.
-            if (-dot(ro, rd) > 0.0 && perigee < uPlanetR + camAlt + 300.0) {
+            // M11n9b: the margin was +300 m — at 8-12 km altitude a
+            // NEAR-HORIZONTAL ray has perigee ≈ camAlt (the ray still exits
+            // the cloud zone far away, above the ground), so the tiny
+            // margin rejected every horizon ray and the horizon atmosphere
+            // band showed no clouds (user report). The ray only paints
+            // cloud ONTO TERRAIN if the perigee actually dips below the
+            // SURFACE: margin = camAlt is exactly the surface radius.
+            if (-dot(ro, rd) > 0.0 && perigee < uPlanetR + 150.0) {
               t0 = 1.0; t1 = 0.0; // no march
             } else {
               t0 = max(tB.y, 0.0);
@@ -658,7 +693,14 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           } else {
             // inside the cloud zone (1.8-12 km)
             t0 = 0.0;
-            t1 = dot(rd, up0) > 0.0 ? tT.y : (tB.x > 0.0 ? tB.x : tB.y);
+            // M11n9b: INSIDE the zone a downward ray must march to where it
+            // EXITS the zone bottom — but tB.x (the bottom sphere's near
+            // hit) is BEHIND the camera when the camera is inside the
+            // bottom sphere (alt < 1.8 km never happens here, but at 8-11
+            // km a downward ray's bottom crossing is the FAR hit tB.y, not
+            // tB.x). Use the far hit for downward rays, the near hit for
+            // the (rare) upward case; up rays exit at the top far hit.
+            t1 = dot(rd, up0) > 0.0 ? tT.y : max(tB.y, 0.0);
           }
           if (tB.x < 0.0 && tB.y < 0.0 && camAlt < ${CLOUD_BOTTOM.toFixed(1)}) {
             t1 = -1.0; // grazing ray that never re-enters: no march
@@ -759,6 +801,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // macro field only thickens/thins the density.
               d *= (0.3 + 0.7 * macroM);
               if (i == 0) dbgD = d;
+              // M11n9b diagnostic: sample the gate layers at the mid point
+              if (i == steps / 2) {
+                float dR, dB, dV;
+                float gT = cloudGateDebug(p, cover, weather, wind, weatherMm, dR, dB, dV);
+                dbgMaxD = dR; dbgSpan = dB; dbgSteps = dV;
+              }
               // edge erosion: high-frequency wisps carve the surface (fades
               // out with distance so far samples stay smooth); hf cells are
               // 640 m — same physical wind divided by that cell size
@@ -845,8 +893,8 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           return;
         }
         if (uCloudDbg > 1.5) {
-          // probe v6: mesh-masked by B=1: R=aV*4, G=weatherMs at anchor
-          gl_FragColor = vec4(clamp(aV * 4.0, 0.0, 1.0), clamp(0.5 + 0.5 * dMacroFrag, 0.0, 1.0), 1.0, 1.0);
+          // probe v6+diag: R=aV*4, G=region(dR), B=vert(dV) — B<1 = body/vert gates
+          gl_FragColor = vec4(clamp(aV * 4.0, 0.0, 1.0), clamp(0.5 + 0.5 * dbgMaxD, 0.0, 1.0), clamp(dbgSteps, 0.0, 1.0), 1.0);
           #include <colorspace_fragment>
           return;
         }
