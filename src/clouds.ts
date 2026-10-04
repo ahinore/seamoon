@@ -482,7 +482,16 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         vec3 shellCol = vec3(0.0);
         float shellA = 0.0;
         if (wShell > 0.0001) {
-          vec3 shellP = upF * (uPlanetR + ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)});
+          // M11n6c PARALLAX FIX: the shell paints its clouds at the
+          // fragment's own direction (upF) on the R+9.8 km shell, but the
+          // clouds it depicts live in the 1.8-4.2 km slab. Along a view ray
+          // the slab crossing is at direction upW, so evaluating the field
+          // at upF displaced the far map outward — when the march took over
+          // (18-25 km handoff) the same clouds snapped to their true slab
+          // positions, the "near and far clouds at different positions"
+          // jump. Anchoring the field at upW paints each cloud where the
+          // march will draw it; from orbit (upW ≈ upF) nothing changes.
+          vec3 shellP = upW * (uPlanetR + ${((CLOUD_BOTTOM + CLOUD_TOP) / 2).toFixed(1)});
           // M10.9d: octave LOD is keyed to ALTITUDE (see fbm3oLod) — the
           // field no longer depends on kmPerPx, so nothing re-sweeps with
           // camera distance and the deck-edge snow cannot shimmer.
