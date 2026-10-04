@@ -395,7 +395,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                    ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)};
         float vertBase = smoothstep(0.0, 0.10, hE) * (1.0 - smoothstep(0.70, 2.20, hE));
         float vertTower = smoothstep(0.0, 0.30, hE) * (1.0 - smoothstep(3.20, 4.40, hE));
-        float vert = max(vertBase, vertTower * tower);
+        // M11n9f ANVIL: real cumulonimbus spread out at the top — above
+        // hE 2 (~6.6 km) the tower mask widens (lower threshold on the
+        // same 9 km lattice) so towers flare outward into anvil caps
+        // instead of ending as vertical columns
+        float towerAnvil = smoothstep(0.40, 0.55, towerN);
+        float towerMask = mix(tower, towerAnvil, smoothstep(2.0, 3.0, hE));
+        float vert = max(vertBase, vertTower * towerMask);
         d *= region * mix(0.55, 1.0, body) * vert;
         return d;
       }
