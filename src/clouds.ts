@@ -635,6 +635,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float tower = smoothstep(0.55, 0.72, towerN);
           d *= region * mix(0.55, 1.0, body) * max(1.0, tower * 1.2);
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
+          // M11n9e: sunset tint on the far map (matches the march's tint)
+          vec3 shellTint = mix(vec3(1.0, 0.48, 0.25), vec3(1.0),
+                               smoothstep(0.05, 0.45, dot(upF, uSunDir)));
           // ---- DEBUG (?cloudbg=1): color-code what suppresses the deck --
           // RED   = sys below threshold (fbm/anchor dips: lattice holes)
           // GREEN = gate low (macro weather suppressing: system gaps)
@@ -654,7 +657,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // Density-driven color: thick cores read warm-white, thin edges
           // cool gray-blue — matches how the volumetric deck shades, and
           // keeps the shell from reading as one flat cream sheet.
-          shellCol = mix(vec3(0.72, 0.76, 0.82), vec3(1.02, 1.0, 0.97), smoothstep(0.05, 0.6, d)) * shellShade;
+          shellCol = mix(vec3(0.72, 0.76, 0.82), vec3(1.02, 1.0, 0.97), smoothstep(0.05, 0.6, d)) * shellShade * shellTint;
           // Opacity calibrated to the volumetric march it replaces: marching
           // the full ~2.4 km slab accumulates ~1-exp(-d * 6). The old k=2600
           // saturated EVERY pixel to opaque (uniform cream sheet from orbit).
@@ -872,8 +875,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                 // 0.45 floor on shadow + stronger ambient: bases seen from
                 // below were rendering luma ~100 (near-black underbellies).
                 shadow = 0.45 + 0.55 * shadow;
-                vec3 lit = vec3(1.0, 0.98, 0.95) * shadow * phase * (0.55 + 0.45 * powder)
-                         + vec3(0.62, 0.68, 0.80) * (0.55 + 0.35 * clamp(cloudHeightE(p), 0.0, 1.2)); // sky ambient
+                // M11n9e: sunset tint — near the terminator the direct sun
+                // term turns warm orange and the sky ambient turns dusk
+                // red-purple (the old fixed white/blue lit the towers the
+                // same at noon and sunset)
+                float sunHs2 = clamp(dot(normalize(p), uSunDir), -1.0, 1.0);
+                vec3 sunCol = mix(vec3(1.0, 0.45, 0.20), vec3(1.0, 0.98, 0.95),
+                                  smoothstep(0.05, 0.45, sunHs2));
+                vec3 ambCol = mix(vec3(0.50, 0.38, 0.48), vec3(0.62, 0.68, 0.80),
+                                  smoothstep(-0.02, 0.30, sunHs2));
+                vec3 lit = sunCol * shadow * phase * (0.55 + 0.45 * powder)
+                         + ambCol * (0.55 + 0.35 * clamp(cloudHeightE(p), 0.0, 1.2)); // sky ambient
                 float aStep = 1.0 - exp(-d * dt * 0.005); // extinction tuned
                 // to the far shell's opacity (1-exp(-d*12)): with k=0.0022
                 // a full column only reached alpha≈0.4 — the deck stayed
