@@ -243,6 +243,10 @@ const moonView = new PlanetView(scene, R_MOON, moonMaterial, {
   // ring to L13+), so the far tiles lost the build/evict race and the
   // horizon band rendered as bare background (the moon black band).
   cacheSize: 900,
+  // M11n9h: the moon has no haze — boost the horizon-ring split so the
+  // grazing band fills with terrain instead of void (earth keeps 0: its
+  // band is haze-covered and the boost costs draw calls)
+  grazingBoost: 5,
   }, MOON_BODY);
 if (urlParams.get('moon') === '0') moonView.root.visible = false;
 // sim clock for the orbit (performance.now-based; deterministic per session)

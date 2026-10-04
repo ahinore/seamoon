@@ -747,12 +747,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             // clear region/body the horizon band rendered as a cloudless
             // strip (user report). Horizontal rays march 40 km (crossing
             // several 60 km-scale regions' edges), steep rays keep 18 km.
-            const int MAX_STEPS = 48;
-            t1 = min(t1, t0 + mix(40000.0, 18000.0,
+            const int MAX_STEPS = 28;
+            t1 = min(t1, t0 + mix(24000.0, 18000.0,
                                   clamp(abs(dot(rd, up0)) * 10.0, 0.0, 1.0)));
             // step count scales with the marched span so the sample
             // density stays ~1 km/step in every direction
-            int steps = int(clamp(uVolSteps * (t1 - t0) / 18000.0, 12.0, 48.0));
+            int steps = int(clamp(uVolSteps * (t1 - t0) / 18000.0, 12.0, 28.0));
             dbgT0 = t0; dbgSpan = (t1 - t0) / 18000.0; dbgSteps = float(steps) / 48.0;
             // cap the marched path: grazing rays through the slab would
             // accumulate alpha=1 over hundreds of km and read as a gray

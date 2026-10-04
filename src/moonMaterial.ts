@@ -69,6 +69,12 @@ export function makeMoonMaterial(sunDir: { value: THREE.Vector3 }): THREE.Shader
         float ndl = clamp((dot(N, uSunDir) + 0.12) / 1.12, 0.0, 1.0);
         // regolith is dark: albedo ~0.12, so cap diffuse well below white
         vec3 col = vCol * (0.035 + 0.965 * ndl) * 0.95;
+        // M11n9h: faint earthshine/starlight ambient — at grazing horizon
+        // views ndl -> 0 and the regolith (albedo 0.12) rendered pure black,
+        // so the horizon band read as a VOID between the lit terrain and
+        // the sky. A small constant blue-gray lift keeps the band visible
+        // as dark terrain (the real moon is lit by earthshine there).
+        col += vec3(0.045, 0.050, 0.060);
 
         // M11c: floodlight pool — inverse-square falloff with a soft near
         // field and a warm white tint, only where the surface faces the lamp

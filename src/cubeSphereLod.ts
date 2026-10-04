@@ -45,6 +45,14 @@ export interface PlanetOptions {
   noCullNear?: boolean;
   /** M11m debug: record near culled nodes' test inputs in stats.cullDbg. */
   cullDbg?: boolean;
+  /**
+   * M11n9h: grazing-split boost strength (0 = off). Near the horizon the
+   * view grazes the surface and the sag metric under-splits tiles — on the
+   * MOON (no haze) that leaves a sparse black band at the horizon. The
+   * earth's horizon band is covered in atmospheric haze, so the boost is
+   * moon-only (default 0).
+   */
+  grazingBoost?: number;
 }
 
 export interface LodStats {
@@ -264,7 +272,11 @@ export class PlanetView {
    * center - origin (double math) every frame, so origin rebases never
    * invalidate cached tile geometry.
    */
+  /** M11n9h: inline-build budget for urgent splits, reset every update. */
+  private urgentLeft = 0;
+
   update(camera: THREE.PerspectiveCamera, origin: THREE.Vector3, viewportHeightPx: number): void {
+    this.urgentLeft = 16; // M11n9h: per-frame inline-build budget
     camera.updateMatrixWorld();
     this.originV.copy(origin);
     // M11c: manual frustum. setFromProjectionMatrix went degenerate at the
@@ -422,10 +434,37 @@ export class PlanetView {
     // Both are monotone in level, so the existing hysteresis stays valid.
     const sagPx = (node.geomError / d) * this.pxPerUnit;
     const edgePx = (node.edgeLen / d) * this.pxPerUnit;
-    const rho = Math.max(sagPx, (edgePx * this.o.tauPx) / this.o.capPx);
+    let rho = Math.max(sagPx, (edgePx * this.o.tauPx) / this.o.capPx);
+    // M11n9h GRAZING BOOST: near the horizon the view grazes the surface —
+    // the tile is seen edge-on, its screen footprint compresses vertically,
+    // and the sag-only metric under-splits it (the moon's black horizon
+    // band: sparse coarse tiles with sky showing between relief bumps).
+    // Boost the error for tiles seen at grazing incidence (the tile normal
+    // nearly perpendicular to the view direction): the horizon ring splits
+    // ~2 levels deeper, closing the band. Earth keeps the same rule (its
+    // horizon band is haze-covered, so the boost rarely bites there).
+    {
+      const toTileX = absCx - this.camPos.x, toTileY = absCy - this.camPos.y, toTileZ = absCz - this.camPos.z;
+      const distT = Math.sqrt(toTileX * toTileX + toTileY * toTileY + toTileZ * toTileZ) || 1;
+      const cosGrazing = Math.abs((toTileX * node.nx + toTileY * node.ny + toTileZ * node.nz) / distT);
+      // M11n9h fix: the boost applies only CLOSE to the camera (d < 60 km,
+      // fading 40-60 km) — the horizon ring at 100-300 km altitude covers
+      // itself in haze, and boosting those tiles exploded the build queue
+      // (pend 2281 at 6.4 km, fps 17). Strength is per-body (moon 5,
+      // earth 0 — the haze covers the earth's horizon band).
+      let nearFade = (dCenter - 40000.0) / 20000.0;
+      nearFade = Math.min(Math.max(nearFade, 0.0), 1.0);
+      nearFade = nearFade * nearFade * (3.0 - 2.0 * nearFade);
+      const boost = (this.o as { grazingBoost?: number }).grazingBoost ?? 0;
+      rho *= 1.0 + boost * (1.0 - nearFade) * (1.0 - cosGrazing) * (1.0 - cosGrazing);
+    }
 
     if (node.children === null) {
-      if (rho > this.o.tauPx && node.level < this.o.maxLevel) this.split(node);
+      if (rho > this.o.tauPx && node.level < this.o.maxLevel) {
+        // M11n9h: urgent when the camera is within ~1.5 tile edges — the
+        // coarse mesh would occlude the close camera (see split())
+        this.split(node, d < node.edgeLen * 1.5);
+      }
       if (node.children === null || !this.childrenReady(node)) {
         this.show(node);
         return;
@@ -532,7 +571,7 @@ export class PlanetView {
     if (node.children) for (const c of node.children) this.hideSubtree(c);
   }
 
-  private split(node: QNode): void {
+  private split(node: QNode, urgent = false): void {
     const cx = node.ix * 2;
     const cy = node.iy * 2;
     node.children = [
@@ -548,6 +587,19 @@ export class PlanetView {
         this.cache.delete(key); // refresh LRU recency
         c.tile = hit;
         this.stats.cacheHits++;
+      } else if (urgent && this.urgentLeft > 0) {
+        // M11n9h: URGENT split — the camera is within ~1.5 tile edges of
+        // this tile, so the coarse parent's displaced mesh can occlude the
+        // camera (inside a moon mountain flank the L5 mesh is above the
+        // true terrain and DoubleSide renders its dark underside — the
+        // black frame at low moon spawn). Build the children INLINE so the
+        // descent to fine levels happens this frame instead of after the
+        // async worker round-trips. Budgeted per frame (urgentLeft) so a
+        // wide urgent frontier can't spike the frame time.
+        this.urgentLeft--;
+        c.tile = this.acquireTile(c);
+        this.root.add(c.tile.mesh);
+        this.stats.built++;
       } else {
         this.queue.push(c);
       }

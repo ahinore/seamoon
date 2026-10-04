@@ -117,6 +117,14 @@ export class AutoPilot {
       // radial position above the moon's near-side point via the SHARED
       // local-frame helper (M9.6: one lat/lon convention for both bodies)
       _pos.copy(localToAbsolute(MOON, lat2, lon2, this.alt0, _pos));
+      // M11n9h: spawn ABOVE THE TERRAIN — alt0 is sphere-relative, and at
+      // low ?alt the camera could end up inside a mountain (black frame:
+      // the near plane clips the surrounding backfaces). Lift by the
+      // terrain height at the spawn direction (+2 m clearance).
+      {
+        const dir = _pos.clone().sub(MOON.center).normalize();
+        _pos.addScaledVector(dir, MOON.height(dir.x, dir.y, dir.z, 0) + 2);
+      }
       this.world.origin.set(0, 0, 0);
       rig.camera.position.copy(_pos);
       rig.camera.up.set(0, 1, 0);
