@@ -892,6 +892,28 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                                   smoothstep(-0.02, 0.30, sunHs2));
                 vec3 lit = sunCol * shadow * phase * (0.55 + 0.45 * powder)
                          + ambCol * (0.55 + 0.35 * clamp(cloudHeightE(p), 0.0, 1.2)); // sky ambient
+                // M11n9g: city glow on cloud bases — over a night-side city
+                // (the SAME 3-octave population field the terrain's city
+                // lights use) the base samples catch a faint orange
+                // up-glow. EMISSIVE (own small alpha, no volT update):
+                // thin bases have aStep≈0 so the lit path can't carry it.
+                float hEg = cloudHeightE(p);
+                if (hEg < 0.4) {
+                  float nightF = smoothstep(0.06, -0.04, dot(normalize(p), uSunDir));
+                  if (nightF > 0.001) {
+                    vec3 gp = normalize(p) * (uPlanetR + 20.0);
+                    float cl1 = fbm2(gp * (1.0 / 900000.0));
+                    float cl2 = fbm2(gp * (1.0 / 120000.0) + vec3(7.31, 2.9, 5.13));
+                    float latG = asin(clamp(normalize(p).y, -1.0, 1.0)) * 57.29578;
+                    float popBand = 0.35 + 0.65 * exp(-pow((latG - 30.0) / 38.0, 2.0));
+                    float pop = smoothstep(0.46, 0.68, cl1) * smoothstep(0.40, 0.62, cl2) * popBand;
+                    if (pop > 0.001) {
+                      float spG = fbm2(gp * (1.0 / 800.0) + vec3(3.7, 9.1, 1.3));
+                      float glow = pop * smoothstep(0.46, 0.72, spG);
+                      volCol += vec3(1.0, 0.70, 0.40) * glow * nightF * 0.10 * volT;
+                    }
+                  }
+                }
                 float aStep = 1.0 - exp(-d * dt * 0.005); // extinction tuned
                 // to the far shell's opacity (1-exp(-d*12)): with k=0.0022
                 // a full column only reached alpha≈0.4 — the deck stayed
