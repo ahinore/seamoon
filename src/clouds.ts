@@ -353,7 +353,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // report). thr raised to mix(0.45,0.30,cover) → ~35-40% coverage,
         // and the march passes a sharper edge (0.10) so puffs read as
         // distinct bodies with visible ground between them.
-        float thr = mix(0.50, 0.36, cover);
+        float thr = mix(0.41, 0.35, cover);
         float d = smoothstep(thr, thr + edge, billow * (0.72 + 0.28 * cover));
         d = clamp(d * 1.35, 0.0, 1.0);
         // Cluster gate: the old smoothstep(0.42,0.62) was so tight that only
@@ -376,15 +376,20 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                          0.30 * smoothstep(0.15, 0.35, wx));
         gate = max(gate, 0.14);
         d *= gate;
-        // M11n8 CLUMP BREAKER: the puff field's correlation length (14 km
-        // fbm octave) made clouds clump into 10-30 km sheets — from 20 km
-        // altitude the whole view sat inside one clump and the deck read
-        // as a 100% cover sheet (user report). A 1.5 km fine mask breaks
-        // every clump into discrete 1-3 km clouds with real ground gaps
-        // between them (Ace-Combat-style). The far shell applies the same
-        // fine field at the same slab positions, so orbit and ground agree.
-        float fine = noise3(p * (1.0 / 1500.0) + windOff * (1.0 / 1500.0));
-        d *= smoothstep(0.46, 0.55, fine);
+        // M11n8b TWO-SCALE COVERAGE: (1) a 60 km region mask splits the
+        // field into cloudy / clear weather regions — the same regions the
+        // orbit view shows, so the top-down coverage matches the far view;
+        // (2) a 4 km fine mask with a hard duty breaks each region into
+        // discrete individual clouds with real ground gaps (Ace-Combat
+        // look) — without it the 14 km puff correlation clumped the deck
+        // into 10-30 km sheets that fully covered the view from 20 km.
+        // The far shell applies the same two masks at the same slab
+        // positions, so orbit and ground agree.
+        float regionN = noise3(p * (1.0 / 60000.0) + windOff * (1.0 / 60000.0));
+        float region = smoothstep(0.42, 0.58, regionN);
+        float fineN = noise3(p * (1.0 / 4000.0) + windOff * (1.0 / 4000.0));
+        float fine = smoothstep(0.44, 0.56, fineN);
+        d *= mix(0.18, 1.0, region) * fine;
         return d;
       }
 
@@ -558,11 +563,11 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // mean 0.499, std 0.180. thr picks q70-q78 → ~33-40% coverage —
           // M11n7: discrete deck with ground gaps (Ace-Combat-style), was
           // q55-q72 (50-60% coverage — a continuous sheet from 20-25 km).
-          float thr = mix(0.63, 0.56, cover);
+          float thr = mix(0.68, 0.60, cover);
           // DIP FLOOR: cloudbg proved the dot holes are sys dips below thr
           // (red class). Shallow dips (the lattice-minima speckle) close by
           // flooring the input 0.055 below thr — deep system gaps survive.
-          float d = smoothstep(thr, thr + 0.10, max(sys, thr - 0.055));
+          float d = smoothstep(thr, thr + 0.06, max(sys, thr - 0.055));
           d = pow(d, 0.45); // saturate interior: translucent gray dots close
           // SINGLE soft gain: the double clamp (1.35 then 1.5) forced the
           // deck to binary alpha — during approach every edge pixel flipped
@@ -579,14 +584,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // scattered cumulus from orbit AND from the ground.
           float sparseS = smoothstep(0.78, 0.92, sys);
           d = max(d, sparseS * 0.35);
-          // M11n8 CLUMP BREAKER: the same 1.5 km fine mask the march's
-          // cloudDensity applies, evaluated at the slab-midpoint position —
-          // breaks the shell's 15-330 km sheets into discrete 1-3 km
-          // clouds with ground gaps (matches the march's clump positions,
-          // so the 18-25 km handoff stays seamless).
-          float fineS = noise3(upW * (uPlanetR + 3000.0) * (1.0 / 1500.0)
-                               + wind * (1.0 / 1500.0));
-          d *= smoothstep(0.46, 0.55, fineS);
+          // M11n8b TWO-SCALE COVERAGE: the same 60 km region mask + 4 km
+          // fine mask the march's cloudDensity applies, evaluated at the
+          // slab-midpoint position — the orbit view's thin deck breaks into
+          // the same discrete clouds the ground view sees, and the 18-25 km
+          // handoff stays seamless.
+          vec3 spFine = upW * (uPlanetR + 3000.0);
+          float regionN = noise3(spFine * (1.0 / 60000.0) + wind * (1.0 / 60000.0));
+          float region = smoothstep(0.42, 0.58, regionN);
+          float fineN = noise3(spFine * (1.0 / 4000.0) + wind * (1.0 / 4000.0));
+          float fine = smoothstep(0.44, 0.56, fineN);
+          d *= mix(0.18, 1.0, region) * fine;
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // ---- DEBUG (?cloudbg=1): color-code what suppresses the deck --
           // RED   = sys below threshold (fbm/anchor dips: lattice holes)
@@ -745,9 +753,10 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // sample distance, so the fade is smooth along the ray too.
               float detail = 1.0 / (1.0 + t * (1.0 / 8000.0));
               // ---- unified density: same function the far shell shows ----
-              // M11n7: sharper edge (0.10) — discrete puff bodies instead
-              // of a soft continuous sheet
-              float d = cloudDensity(p, cover, weather, wind, 0.10, detail, weatherMm);
+              // M11n7: sharper edge (0.06) — discrete puff bodies instead
+              // of a soft continuous sheet; the narrow partial-density band
+              // also keeps oblique slant paths from veiling over
+              float d = cloudDensity(p, cover, weather, wind, 0.06, detail, weatherMm);
               // M11n3 macro coupling: the gate is macroM, evaluated ONCE per
               // fragment at the column midpoint (above). The older schemes
               // both failed: per-fragment constants measured a different
@@ -791,8 +800,8 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                   vec3 pl = p + uSunDir * (float(j) * 220.0);
                   float fl = fbm3o(pl * (1.0 / 3000.0) + wind * (1.0 / 3000.0), 1.0);
                   float bl = 1.0 - abs(2.0 * fl - 1.0);
-                  // same threshold family as cloudDensity (M11n7: mix(0.45,0.30)):
-                  float thrS = mix(0.45, 0.30, cover);
+                  // same threshold family as cloudDensity (M11n8b: mix(0.41,0.35)):
+                  float thrS = mix(0.41, 0.35, cover);
                   od += smoothstep(thrS, thrS + 0.18, bl * (0.72 + 0.28 * cover)) * 220.0;
                 }
                 float shadow = exp(-od * 0.0008);     // Beer-Lambert, gentler:
