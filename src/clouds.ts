@@ -84,6 +84,27 @@ export const cloudWeatherGLSL = (p: string): string => /* glsl */ `
         return 0.6 * (0.5 + ${p}gnoise3(pw) * 1.1)
              + 0.3 * (0.5 + ${p}gnoise3(pw * 2.13) * 1.1) + 0.05;
       }
+      // M11n9d: value-noise octave matching clouds.ts noise3 exactly (same
+      // hash13 lattice + wrap) — the region/body masks must be the SAME
+      // field the cloud hulls draw, or shadows drift off the clouds
+      float ${p}noise3(vec3 x) {
+        x = mod(x, 2048.0);
+        vec3 i = floor(x);
+        vec3 f = fract(x);
+        f = f * f * (3.0 - 2.0 * f);
+        vec3 i1 = mod(i + 1.0, 2048.0);
+        return mix(
+          mix(mix(${p}hash13(i), ${p}hash13(i1), f.x),
+              mix(${p}hash13(vec3(i.x, i1.y, i.z)), ${p}hash13(vec3(i1.x, i1.y, i.z)), f.x), f.y),
+          mix(mix(${p}hash13(vec3(i.x, i.y, i1.z)), ${p}hash13(vec3(i1.x, i.y, i1.z)), f.x),
+              mix(${p}hash13(vec3(i.x, i1.y, i1.z)), ${p}hash13(i1), f.x), f.y),
+          f.z);
+      }
+      float ${p}fbm4(vec3 pw) {
+        float a = 0.5, s = 0.0;
+        for (int i = 0; i < 4; i++) { s += a * ${p}noise3(pw); pw *= 2.13; a *= 0.5; }
+        return s;
+      }
 `;
 
 export function makeCloudUniforms(planetR: number): CloudUniforms {

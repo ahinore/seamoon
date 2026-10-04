@@ -127,11 +127,10 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
       void main() {
         // wrapped Lambert: soft terminator instead of a hard day/night cut
         float ndl = clamp((dot(normalize(vN), uSunDir) + 0.18) / 1.18, 0.0, 1.0);
-        // M11n4: cloud shadows — evaluate the deck's MACRO weather (the same
-        // fbm2 field and gate the far shell draws) at the sun ray's
-        // slab-midpoint crossing, and dim the DIRECT sun term under it. The
-        // 0.10 ambient floor keeps shadows readable; the fbm texture inside
-        // systems is not shadowed (system-scale shadows only).
+        // M11n9d: cloud shadows — evaluate the deck's REGION/BODY structure
+        // (the same fields the cloud hulls draw, via the shared cw* noise)
+        // at the sun ray's slab crossing, and dim the DIRECT sun term under
+        // it. The 0.10 ambient floor keeps shadows readable.
         float cShadow = 1.0;
         if (uCloudShadow > 0.5) {
           vec3 sro = vWorld + uOrigin;      // surface point, planet frame
@@ -142,19 +141,23 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
           if (shq > 0.0) {
             float st = (-sb - sqrt(shq)) > 0.0 ? (-sb - sqrt(shq)) : (-sb + sqrt(shq));
             if (st > 0.0) {
-              vec3 upW = normalize(sro + uSunDir * st);
+              vec3 pX = sro + uSunDir * st;
+              vec3 windS = vec3(uTime * 4.5, uTime * 4.5 * 1.3, -uTime * 4.5 * 0.8);
+              float regionN = cwnoise3(pX * (1.0 / 60000.0) + windS * (1.0 / 60000.0));
+              float region = smoothstep(0.50, 0.60, regionN);
+              float bodyN = cwnoise3(pX * (1.0 / 4000.0) + windS * (1.0 / 4000.0));
+              float body = smoothstep(0.44, 0.56, bodyN);
+              float deck = region * mix(0.55, 1.0, body);
+              // weather gate (same family as cloudDensity's): dry troughs
+              // gate the deck off even inside a cloudy region
+              vec3 upW = normalize(pX);
               float wTime = uTime * 2e-5;
               float weatherM = cwfbm2(upW * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
-              float latS = asin(clamp(upW.y, -1.0, 1.0));
-              float bandsS = 0.55 + 0.45 * cos(latS * 6.0) * 0.5
-                           + 0.25 * exp(-pow((abs(latS) - 0.15) * 3.0, 2.0));
-              float coverS = clamp(uCover * bandsS * 1.6 * weatherM + (weatherM - 0.5) * 0.4, 0.0, 1.0);
-              coverS = pow(coverS, 0.7);
-              float gateS = max(smoothstep(0.34, 0.55, weatherM),
-                                0.12 * smoothstep(0.15, 0.35, weatherM));
-              float deck = pow(smoothstep(0.34, 0.55, weatherM), 0.45) * gateS
-                         * clamp(coverS * 1.6, 0.0, 1.0);
-              cShadow = 1.0 - 0.72 * clamp(deck, 0.0, 1.0);
+              float weather4 = cwfbm4(upW * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
+              float wxS = max(weather4, weatherM);
+              float gateS = max(smoothstep(0.40, 0.58, wxS),
+                                0.30 * smoothstep(0.15, 0.35, wxS));
+              cShadow = 1.0 - 0.72 * clamp(deck * gateS, 0.0, 1.0);
             }
           }
         }
@@ -401,8 +404,8 @@ export function makeSeaMaterial(shared: {
       }
 
       ${cloudWeatherGLSL('cw')}
-      // M11n4: cloud shadow — same macro-deck evaluation as the terrain
-      // shader (see makePlanetMaterial's cShadow block for the derivation).
+      // M11n9d: cloud shadow — the SAME region/body structure the cloud
+      // hulls draw (see makePlanetMaterial's cShadow block)
       float cloudShadow(vec3 sroV, vec3 origin, float planetR, float time, float cover) {
         float cShadow = 1.0;
         vec3 sro = sroV + origin;
@@ -413,19 +416,21 @@ export function makeSeaMaterial(shared: {
         if (shq > 0.0) {
           float st = (-sb - sqrt(shq)) > 0.0 ? (-sb - sqrt(shq)) : (-sb + sqrt(shq));
           if (st > 0.0) {
-            vec3 upW = normalize(sro + uSunDir * st);
+            vec3 pX = sro + uSunDir * st;
+            vec3 windS = vec3(time * 4.5, time * 4.5 * 1.3, -time * 4.5 * 0.8);
+            float regionN = cwnoise3(pX * (1.0 / 60000.0) + windS * (1.0 / 60000.0));
+            float region = smoothstep(0.50, 0.60, regionN);
+            float bodyN = cwnoise3(pX * (1.0 / 4000.0) + windS * (1.0 / 4000.0));
+            float body = smoothstep(0.44, 0.56, bodyN);
+            float deck = region * mix(0.55, 1.0, body);
+            vec3 upW = normalize(pX);
             float wTime = time * 2e-5;
             float weatherM = cwfbm2(upW * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
-            float latS = asin(clamp(upW.y, -1.0, 1.0));
-            float bandsS = 0.55 + 0.45 * cos(latS * 6.0) * 0.5
-                         + 0.25 * exp(-pow((abs(latS) - 0.15) * 3.0, 2.0));
-            float coverS = clamp(cover * bandsS * 1.6 * weatherM + (weatherM - 0.5) * 0.4, 0.0, 1.0);
-            coverS = pow(coverS, 0.7);
-            float gateS = max(smoothstep(0.34, 0.55, weatherM),
-                              0.12 * smoothstep(0.15, 0.35, weatherM));
-            float deck = pow(smoothstep(0.34, 0.55, weatherM), 0.45) * gateS
-                       * clamp(coverS * 1.6, 0.0, 1.0);
-            cShadow = 1.0 - 0.72 * clamp(deck, 0.0, 1.0);
+            float weather4 = cwfbm4(upW * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
+            float wxS = max(weather4, weatherM);
+            float gateS = max(smoothstep(0.40, 0.58, wxS),
+                              0.30 * smoothstep(0.15, 0.35, wxS));
+            cShadow = 1.0 - 0.72 * clamp(deck * gateS, 0.0, 1.0);
           }
         }
         return cShadow;
