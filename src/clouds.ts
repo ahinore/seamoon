@@ -347,7 +347,14 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // full layer (the "clouds vanish / near clouds pale" handoff).
         // mix(0.55,0.30,cover) + (0.72+0.28*cover): top ~15-45% — dense
         // enough to match the far map, still puff-shaped.
-        float thr = mix(0.55, 0.30, cover);
+        // M11n6: the 15-30% puff coverage was the "clouds disappear when
+        // looking up" root cause — a vertical ray crosses only ~1 puff cell
+        // (3 km) so 70-85% of zenith columns saw a GAP while the orbit view
+        // showed a 40-60% deck (the shell thresholds sys, not billow).
+        // thr lowered to mix(0.38,0.20,cover) → ~45-60% coverage, matching
+        // the far map; the grazing band was already saturated and the
+        // light-march threshold follows below.
+        float thr = mix(0.38, 0.20, cover);
         float d = smoothstep(thr, thr + edge, billow * (0.72 + 0.28 * cover));
         d = clamp(d * 1.35, 0.0, 1.0);
         // Cluster gate: the old smoothstep(0.42,0.62) was so tight that only
@@ -361,9 +368,14 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // the same cell cloudy, so the deck showed from orbit but marched
         // to aV=0 from inside). max() keeps the deck interior present
         // wherever the SHELL's own gate would keep it.
+        // M11n6: unconditional density floor — in deep-dry cells (both
+        // weather fields low) this gate was 0, so the march accumulated
+        // nothing even with the macroM floor; the zenith then read as
+        // HARD-clear. 0.14 keeps sparse thin puffs overhead everywhere.
         float wx = max(weather, weatherM2);
         float gate = max(smoothstep(0.40, 0.58, wx),
                          0.30 * smoothstep(0.15, 0.35, wx));
+        gate = max(gate, 0.14);
         d *= gate;
         return d;
       }
@@ -539,6 +551,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // edge alpha keeps features identifiable while the view scales.
           float gate = max(smoothstep(0.34, 0.55, weatherM),
                            0.12 * smoothstep(0.15, 0.35, weatherM));
+          // M11n6: the shell gets the same unconditional dry-trough floor
+          // as the march's macroM — orbit and ground must agree.
+          gate = max(gate, 0.16);
           d *= gate;
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // ---- DEBUG (?cloudbg=1): color-code what suppresses the deck --
@@ -666,6 +681,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                                           max(sysM, macroThrM - 0.055)), 0.45)
                          * max(smoothstep(0.34, 0.55, weatherMm),
                                0.12 * smoothstep(0.15, 0.35, weatherMm));
+            // M11n6: dry-trough floor — in a dry weather cell macroM was
+            // exactly 0 (sysM < threshold), so looking up from under a dry
+            // cell showed a HARD-clear zenith with stars while the horizon
+            // directions (different cells) kept their deck — "clouds
+            // disappear when looking up". UNCONDITIONAL floor: it must hold
+            // even when both weather fields dip (wt=16000 case), and the
+            // far shell's gate gets the same floor so orbit and ground
+            // agree (M11n3 consistency rule).
+            macroM = max(macroM, 0.60); // TEMP M11n6 diagnostic
             dbgMacro = macroM;
             float dt = (t1 - t0) / float(steps);
             // Static dither (Interleaved Gradient Noise, Jimenez'): breaks
@@ -723,8 +747,8 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                   vec3 pl = p + uSunDir * (float(j) * 220.0);
                   float fl = fbm3o(pl * (1.0 / 3000.0) + wind * (1.0 / 3000.0), 1.0);
                   float bl = 1.0 - abs(2.0 * fl - 1.0);
-                  // same threshold family as cloudDensity (thr = mix(0.55,0.30)):
-                  float thrS = mix(0.55, 0.30, cover);
+                  // same threshold family as cloudDensity (M11n6: mix(0.38,0.20)):
+                  float thrS = mix(0.38, 0.20, cover);
                   od += smoothstep(thrS, thrS + 0.18, bl * (0.72 + 0.28 * cover)) * 220.0;
                 }
                 float shadow = exp(-od * 0.0008);     // Beer-Lambert, gentler:
@@ -779,9 +803,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         alpha = clamp(alpha, 0.0, 1.0);
         // ?cloudbg=2: march probe — R=aV*4, G=span/18km, B=steps/28,
         // plus dbgMaxD folded into B's fraction. Diagnoses below-deck.
+        if (uCloudDbg > 3.5) {
+          // probe v9: R=cover, G=macroThrM, B=macroThr* (bands/lat diag)
+          float latD = asin(clamp(upF.y, -1.0, 1.0));
+          float bandsD = 0.55 + 0.45 * cos(lat * 6.0) * 0.5 + 0.25 * exp(-pow((abs(lat) - 0.15) * 3.0, 2.0));
+          gl_FragColor = vec4(clamp(cover, 0.0, 1.0), clamp(macroThr, 0.0, 1.0), clamp(bandsD * 0.5, 0.0, 1.0), 1.0);
+          #include <colorspace_fragment>
+          return;
+        }
         if (uCloudDbg > 2.5) {
-          // probe v8: R=macroM, G=sysM, B=weatherMm (fbm2)
-          gl_FragColor = vec4(clamp(dbgMacro, 0.0, 1.0), clamp(dbgSys, 0.0, 1.0), clamp(dbgWeather, 0.0, 1.0), 1.0);
+          // TEMP M11n6 diagnostic: constant red = near hull coverage map
+          gl_FragColor = vec4(0.9, 0.08, 0.05, 1.0);
           #include <colorspace_fragment>
           return;
         }

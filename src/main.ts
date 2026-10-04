@@ -221,6 +221,7 @@ let __flightExposed = false;
 if (urlParams.get('cloudbg') === '1') cloudUniforms.uCloudDbg.value = 1;
 if (urlParams.get('cloudbg') === '2') cloudUniforms.uCloudDbg.value = 2;
 if (urlParams.get('cloudbg') === '3') cloudUniforms.uCloudDbg.value = 3;
+if (urlParams.get('cloudbg') === '4') cloudUniforms.uCloudDbg.value = 4;
 
 // M10.5: vegetation lighting shares the same sun-direction object as the
 // terrain/atmosphere — trees and ground can never disagree on the light.
