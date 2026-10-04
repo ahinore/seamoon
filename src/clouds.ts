@@ -505,10 +505,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // M11n9b: the shell starts at the TOWER TOPS (12 km) — its geometry
         // sits at 12 km now, so painting from 8 km up (overlapping the
         // march's fade) keeps the horizon band populated at every altitude
-        float wShell = (1.0 - wVol) * smoothstep(8000.0, 14000.0, camAlt);
+        float wShell = (1.0 - wVol) * smoothstep(6000.0, 10000.0, camAlt);
         vec3 shellCol = vec3(0.0);
         float shellA = 0.0;
-        if (wShell > 0.0001) {
+        float shellAraw = 0.0; // M11n9c: shell alpha without the altitude weight — the far-band fill uses it
+        // M11n9c gate: the NEAR hull computes the shell map below 12 km (its
+        // far-band fill needs it); the FAR hull computes it when it paints
+        if ((uNearHull > 0.5 && camAlt < 12000.0) || (uNearHull < 0.5 && wShell > 0.0001)) {
           // M11n6c PARALLAX FIX: the shell paints its clouds at the
           // fragment's own direction (upF) on the R+9.8 km shell, but the
           // clouds it depicts live in the 1.8-4.2 km slab. Along a view ray
@@ -639,6 +642,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // d 0.2-0.5 regions were 30-80% see-through, compositing the dark
           // ground into a warm-gray dot).
           shellA = 1.0 - exp(-d * 12.0);
+          shellAraw = shellA;
           shellA *= wShell;
           // night fade (same terms as the volumetric path)
           float sunHs = dot(up0, uSunDir);
@@ -706,15 +710,24 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             t1 = -1.0; // grazing ray that never re-enters: no march
           }
           if (t1 > t0) {
-            const int MAX_STEPS = 28;
-            int steps = int(clamp(uVolSteps, 4.0, 28.0));
-            dbgT0 = t0; dbgSpan = (t1 - t0) / 18000.0; dbgSteps = float(steps) / 28.0;
+            // M11n9c: the march cap is DIRECTION-DEPENDENT now. A
+            // near-horizontal ray from inside the cloud zone stays in the
+            // zone for 100+ km; the old flat 18 km cap meant the march
+            // sampled only the first 18 km — when that stretch sat in a
+            // clear region/body the horizon band rendered as a cloudless
+            // strip (user report). Horizontal rays march 40 km (crossing
+            // several 60 km-scale regions' edges), steep rays keep 18 km.
+            const int MAX_STEPS = 48;
+            t1 = min(t1, t0 + mix(40000.0, 18000.0,
+                                  clamp(abs(dot(rd, up0)) * 10.0, 0.0, 1.0)));
+            // step count scales with the marched span so the sample
+            // density stays ~1 km/step in every direction
+            int steps = int(clamp(uVolSteps * (t1 - t0) / 18000.0, 12.0, 48.0));
+            dbgT0 = t0; dbgSpan = (t1 - t0) / 18000.0; dbgSteps = float(steps) / 48.0;
             // cap the marched path: grazing rays through the slab would
             // accumulate alpha=1 over hundreds of km and read as a gray
-            // wall. 18 km keeps distant air hazy instead of solid, and the
-            // shorter path doubles the effective step density (fewer
-            // aliasing artifacts on grazing views).
-            t1 = min(t1, t0 + 18000.0);
+            // wall. (M11n9c: the flat 18 km cap was replaced by the
+            // direction-dependent cap above — horizontal 40 km / steep 18 km.)
             // M11n3 UNIFIED MACRO: evaluate the SHELL's exact system field
             // at the column midpoint direction (per-fragment is enough: the
             // 152 km system scale varies ~12% of a cell over the 18 km
@@ -855,16 +868,30 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         }
 
         // ---------------- composite (shell + volumetric) ----------------
-        // Complementary weights (wShell = 1 - wVol above 25 km): coverage
-        // alpha = aV*wVol + aS_shell*wShell sums to full coverage at every
-        // altitude; color is the opacity-weighted mean of the two layers'
-        // lit colors, so puffs stay bright-white through the handoff.
+        // M11n9c: two-layer composite. The march paints 0-40 km along the
+        // ray; the far shell paints the ray's distant crossing (200-300 km
+        // for horizon rays from inside the zone). The old complementary
+        // weights (aV·wVol + aS·(1-wVol)) zeroed the shell below 8 km, so
+        // the distant band the march can't reach stayed empty — the clear
+        // strip at the horizon from inside the cloud zone (user report).
+        // The far-band fill (shellAraw gated to the 5-6.5 km+ band, march
+        // primary only) fills exactly those gaps over-composited behind
+        // the march's clouds.
         float aV = 1.0 - volT;            // march coverage (already wVol-scaled below)
-        float aS = shellA;                // shell coverage (wShell-scaled in shellA)
-        float cov = clamp(aV * wVol + aS * (1.0 - wVol), 0.0, 1.0);
-        vec3 col = cov > 0.0001
-          ? (volCol * wVol + shellCol * (1.0 - wVol)) / max(wVol + (1.0 - wVol), 0.0001)
+        // M11n9c: the near hull's primary shell contribution is suppressed
+        // (the far hull owns the shell map above the march's reach); the
+        // near hull uses shellAraw only through the far-band fill
+        float aS = shellA * mix(1.0, 0.0, uNearHull);
+        float covP = clamp(aV * wVol + aS * (1.0 - wVol), 0.0, 1.0);
+        vec3 colP = covP > 0.0001
+          ? (volCol * wVol + shellCol * (1.0 - wVol) * (1.0 - uNearHull)) / max(wVol + (1.0 - wVol), 0.0001)
           : vec3(0.0);
+        // far-band fill: active when the march is the primary painter and
+        // the camera sits above the base deck top (where horizon rays
+        // leave the deck and need the distant regions filled)
+        float shellFar = shellAraw * smoothstep(5000.0, 6500.0, camAlt) * wVol;
+        float cov = clamp(covP + shellFar * (1.0 - covP), 0.0, 1.0);
+        vec3 col = (colP * covP + shellCol * shellFar * (1.0 - covP)) / max(cov, 0.0001);
         float alpha = cov;
         // altitude-based opacity fade inside the band (flying through).
         // Floor 0.55 (was 0.35): inside/near the slab the deck used to dim
@@ -921,13 +948,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
   // near hull (uNearHull=1) → march ONLY; far hull (0) → shell ONLY.
   const nearMat = makeMat(1);
   const farMat = makeMat(0);
-  const gateShell = 'if (wShell > 0.0001 && uNearHull < 0.5) {';
+  // M11n9c: the shell gate is IN the source now (uNearHull-conditional);
+  // only the march gate needs the hull injection
   const gateVol = 'if (wVol > 0.001 && uNearHull > 0.5) {';
   nearMat.fragmentShader = FRAGMENT
-    .replace('if (wShell > 0.0001) {', gateShell)
     .replace('if (wVol > 0.001) {', gateVol);
   farMat.fragmentShader = FRAGMENT
-    .replace('if (wShell > 0.0001) {', gateShell)
     .replace('if (wVol > 0.001) {', gateVol);
   const nearMesh = new THREE.Mesh(nearGeo, nearMat);
   const farMesh = new THREE.Mesh(farGeo, farMat);
