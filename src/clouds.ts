@@ -336,63 +336,49 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         float f1 = fbm3o(pw, detail);
         float billow = 1.0 - abs(2.0 * f1 - 1.0); // rounded blobs [0,1]
         // Billow field statistics (200k samples): mean 0.19, median 0.23,
-        // q70 0.52, q85 0.76. The old thr range (0.30 -> -0.10 with cover)
-        // sat BELOW the mean: with cover ~0.4+ the smoothstep fired over
-        // most of the field, every grazing ray saturated alpha within its
-        // 40 km budget, and the deck read as a flat gray "water" sheet.
-        // thr anchored WELL above the median kept the deck so sparse that
-        // (with the (0.55+0.45*cover) scale) only the top ~2-5% of the
-        // field passed — a nadir/grazing column crossed ZERO puffs and the
-        // near view showed no deck at all while the far shell showed a
-        // full layer (the "clouds vanish / near clouds pale" handoff).
-        // mix(0.55,0.30,cover) + (0.72+0.28*cover): top ~15-45% — dense
-        // enough to match the far map, still puff-shaped.
-        // M11n7 ACE-COMBAT-STYLE DECK: discrete clouds with ground gaps.
-        // The previous mix(0.38,0.20) + the soft 0.18 edge made the deck
-        // read as a continuous sheet covering the whole ground (user
-        // report). thr raised to mix(0.45,0.30,cover) → ~35-40% coverage,
-        // and the march passes a sharper edge (0.10) so puffs read as
-        // distinct bodies with visible ground between them.
-        float thr = mix(0.41, 0.35, cover);
+        // q70 0.52, q85 0.76.
+        // M11n9 REDESIGN — limited regions + discrete bodies + towering
+        // cumulonimbus. The old region/fine/floor chain always left a deck
+        // veil covering the ground at every altitude (user report: "the
+        // ground is completely covered — rework the cloud implementation
+        // from scratch"). The new structure:
+        //   REGION (60 km cells, ~25% of the planet): where clouds exist
+        //   at all — everywhere else is clear sky, matching the far view.
+        //   BODY (4 km cells): discrete cloud bodies within a region.
+        //   TOWER (9 km cells, ~30% of the bodies): cumulonimbus towers
+        //   rising from the 1.8 km base to ~12 km — thick vertical cores
+        //   (入道雲).
+        float thr = mix(0.45, 0.30, cover);
         float d = smoothstep(thr, thr + edge, billow * (0.72 + 0.28 * cover));
         d = clamp(d * 1.35, 0.0, 1.0);
-        // Cluster gate: the old smoothstep(0.42,0.62) was so tight that only
-        // isolated weather-field speckles passed — clouds read as mottled
-        // fuzz instead of coherent systems. The wide gate grows proper
-        // clusters; below it a thin sparse haze (0.3x) keeps clear skies
-        // limited to the genuinely dry weather troughs.
-        // M11n3: gate on the WORSE of the two weather evaluations. The old
-        // fbm4-only gate zeroed the deck's interior whenever the fine
-        // octaves dipped (the far shell — gated on the smooth fbm2 — kept
-        // the same cell cloudy, so the deck showed from orbit but marched
-        // to aV=0 from inside). max() keeps the deck interior present
-        // wherever the SHELL's own gate would keep it.
-        // M11n6: unconditional density floor — in deep-dry cells (both
-        // weather fields low) this gate was 0, so the march accumulated
-        // nothing even with the macroM floor; the zenith then read as
-        // HARD-clear. 0.14 keeps sparse thin puffs overhead everywhere.
+        // Cluster gate: the wide gate grows proper clusters; below it a
+        // thin sparse haze keeps clear skies in genuinely dry troughs.
         float wx = max(weather, weatherM2);
         float gate = max(smoothstep(0.40, 0.58, wx),
                          0.30 * smoothstep(0.15, 0.35, wx));
-        gate = max(gate, 0.14);
         d *= gate;
-        // M11n8b TWO-SCALE COVERAGE: (1) a 60 km region mask splits the
-        // field into cloudy / clear weather regions — the same regions the
-        // orbit view shows, so the top-down coverage matches the far view;
-        // (2) a 4 km fine mask with a hard duty breaks each region into
-        // discrete individual clouds with real ground gaps (Ace-Combat
-        // look) — without it the 14 km puff correlation clumped the deck
-        // into 10-30 km sheets that fully covered the view from 20 km.
-        // The far shell applies the same two masks at the same slab
-        // positions, so orbit and ground agree.
         float regionN = noise3(p * (1.0 / 60000.0) + windOff * (1.0 / 60000.0));
-        float region = smoothstep(0.42, 0.58, regionN);
-        float fineN = noise3(p * (1.0 / 4000.0) + windOff * (1.0 / 4000.0));
-        float fine = smoothstep(0.44, 0.56, fineN);
-        d *= mix(0.18, 1.0, region) * fine;
+        float region = smoothstep(0.50, 0.60, regionN);
+        float bodyN = noise3(p * (1.0 / 4000.0) + windOff * (1.0 / 4000.0));
+        float body = smoothstep(0.44, 0.56, bodyN);
+        float towerN = noise3(p * (1.0 / 9000.0) + windOff * (1.0 / 9000.0));
+        float tower = smoothstep(0.55, 0.72, towerN);
+        // vertical profile in slab units: hE 0 = 1.8 km base, 1 = 4.2 km
+        // (the old deck top), 4.3 = ~12 km (tower top)
+        float hE = (length(p) - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
+                   ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)};
+        float vertBase = smoothstep(0.0, 0.10, hE) * (1.0 - smoothstep(0.70, 1.10, hE));
+        float vertTower = smoothstep(0.0, 0.30, hE) * (1.0 - smoothstep(3.20, 4.40, hE));
+        float vert = max(vertBase, vertTower * tower);
+        d *= region * mix(0.55, 1.0, body) * vert;
         return d;
       }
-
+      // M11n9: the extended slab-unit height (0 = base … 4.3 = tower top),
+      // exposed for the march's ambient term
+      float cloudHeightE(vec3 p) {
+        return (length(p) - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
+               ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)};
+      }
       void main() {
         vec3 pc = -uOrigin;
         vec3 ro = uCamPos - pc;      // ray origin in planet frame
@@ -584,17 +570,18 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // scattered cumulus from orbit AND from the ground.
           float sparseS = smoothstep(0.78, 0.92, sys);
           d = max(d, sparseS * 0.35);
-          // M11n8b TWO-SCALE COVERAGE: the same 60 km region mask + 4 km
-          // fine mask the march's cloudDensity applies, evaluated at the
-          // slab-midpoint position — the orbit view's thin deck breaks into
-          // the same discrete clouds the ground view sees, and the 18-25 km
-          // handoff stays seamless.
-          vec3 spFine = upW * (uPlanetR + 3000.0);
-          float regionN = noise3(spFine * (1.0 / 60000.0) + wind * (1.0 / 60000.0));
-          float region = smoothstep(0.42, 0.58, regionN);
-          float fineN = noise3(spFine * (1.0 / 4000.0) + wind * (1.0 / 4000.0));
-          float fine = smoothstep(0.44, 0.56, fineN);
-          d *= mix(0.18, 1.0, region) * fine;
+          // M11n9 REDESIGN: the SAME region/body/tower structure as the
+          // march's cloudDensity, evaluated at the slab-midpoint position —
+          // the orbit view shows the same limited cloudy regions with the
+          // same discrete bodies, and the 18-25 km handoff stays seamless.
+          vec3 spF = upW * (uPlanetR + 3000.0);
+          float regionN = noise3(spF * (1.0 / 60000.0) + wind * (1.0 / 60000.0));
+          float region = smoothstep(0.50, 0.60, regionN);
+          float bodyN = noise3(spF * (1.0 / 4000.0) + wind * (1.0 / 4000.0));
+          float body = smoothstep(0.44, 0.56, bodyN);
+          float towerN = noise3(spF * (1.0 / 9000.0) + wind * (1.0 / 9000.0));
+          float tower = smoothstep(0.55, 0.72, towerN);
+          d *= region * mix(0.55, 1.0, body) * max(1.0, tower * 1.2);
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // ---- DEBUG (?cloudbg=1): color-code what suppresses the deck --
           // RED   = sys below threshold (fbm/anchor dips: lattice holes)
@@ -638,13 +625,16 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         float dbgT0 = 0.0, dbgSpan = 0.0, dbgSteps = 0.0, dbgMaxD = 0.0;
         float dbgMacro = 0.0, dbgD = 0.0, dbgWeather = weather, dbgSys = 0.0;
         if (wVol > 0.001) {
+          // M11n9: the cloud zone now extends to the TOWER tops (~12 km) —
+          // cumulonimbus towers rise from the 1.8 km base through the old
+          // 4.2 km deck top
           float rB = uPlanetR + ${CLOUD_BOTTOM.toFixed(1)};
-          float rT = uPlanetR + ${CLOUD_TOP.toFixed(1)};
+          float rT = uPlanetR + 12000.0;
           vec2 tB = raySphere(ro, rd, rB);
           vec2 tT = raySphere(ro, rd, rT);
           float t0, t1;
           if (camAlt < ${CLOUD_BOTTOM.toFixed(1)}) {
-            // below the slab: enter at bottom-sphere far hit, exit at top far hit.
+            // below the base: enter at bottom-sphere far hit, exit at top far hit.
             // HORIZON REJECTION: the near hull has depthTest off (mountains
             // must not erase the deck), so downward rays whose sight line
             // strikes the ground BEFORE the slab would paint cloud onto the
@@ -661,14 +651,14 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               t0 = max(tB.y, 0.0);
               t1 = tT.y;
             }
-          } else if (camAlt > ${CLOUD_TOP.toFixed(1)}) {
-            // above: enter at top near hit, exit at bottom near hit
+          } else if (camAlt > 12000.0) {
+            // above the tower tops: enter at top near hit, exit at bottom near hit
             t0 = max(tT.x, 0.0);
             t1 = tB.x;
           } else {
-            // inside the slab
+            // inside the cloud zone (1.8-12 km)
             t0 = 0.0;
-            t1 = tT.y > 0.0 ? tT.y : tB.y;
+            t1 = dot(rd, up0) > 0.0 ? tT.y : (tB.x > 0.0 ? tB.x : tB.y);
           }
           if (tB.x < 0.0 && tB.y < 0.0 && camAlt < ${CLOUD_BOTTOM.toFixed(1)}) {
             t1 = -1.0; // grazing ray that never re-enters: no march
@@ -721,15 +711,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                                           max(sysM, macroThrM - 0.055)), 0.45)
                          * max(smoothstep(0.34, 0.55, weatherMm),
                                0.12 * smoothstep(0.15, 0.35, weatherMm));
-            // M11n6: dry-trough floor — in a dry weather cell macroM was
-            // exactly 0 (sysM < threshold), so looking up from under a dry
-            // cell showed a HARD-clear zenith with stars while the horizon
-            // directions (different cells) kept their deck — "clouds
-            // disappear when looking up". UNCONDITIONAL floor: it must hold
-            // even when both weather fields dip (wt=16000 case), and the
-            // far shell's gate gets the same floor so orbit and ground
-            // agree (M11n3 consistency rule).
-            macroM = max(macroM, 0.60); // TEMP M11n6 diagnostic
+            // M11n9: macroM is now a SOFT density modulator (0.3+0.7·m at
+            // the d multiply below) — the M11n6 hard gate + floor chain is
+            // gone; the new region/body/tower structure owns coverage.
             dbgMacro = macroM;
             float dt = (t1 - t0) / float(steps);
             // Static dither (Interleaved Gradient Noise, Jimenez'): breaks
@@ -744,8 +728,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               if (i >= steps) break;
               vec3 p = ro + rd * t;
               float r = length(p);
-              float h = clamp((r - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
-                              ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)}, 0.0, 1.0);
+              // M11n9: hE (extended slab units, 0=base … 4.3=tower top) is
+              // computed inside cloudDensity; the old h (deck-only units)
+              // is no longer needed here
               // Detail LOD: fade the 3rd fbm octave with distance INSTEAD of
               // rescaling the lattice (rescaling planet-frame coords per
               // pixel jumps the noise grid by whole cells -> the concentric
@@ -769,29 +754,18 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // cannot change across an 18 km path, and using the shell's
               // field/thresholds is what makes the inside view agree with
               // the orbit view.
-              d *= macroM;
+              // M11n9: macroM is a SOFT modulator (0.3 + 0.7·m) — coverage
+              // structure comes from cloudDensity's region/body/tower; the
+              // macro field only thickens/thins the density.
+              d *= (0.3 + 0.7 * macroM);
               if (i == 0) dbgD = d;
-              // M11n6b: sparse fair-weather puffs — the density floors only
-              // guarantee PRESENCE at ~0.02 density (an invisible haze); the
-              // billow PEAKS (top ~12% of the field) instead render as
-              // distinct opaque puffs, so a dry cell reads as scattered
-              // fair-weather cumulus instead of "clouds disappeared".
-              // Applied AFTER the macroM multiply so the sparse puffs keep
-              // their opacity regardless of the dry-cell gate floor.
-              float flS = fbm3o(p * (1.0 / 3000.0) + wind * (1.0 / 3000.0), detail);
-              float sparse = smoothstep(0.62, 0.80, 1.0 - abs(2.0 * flS - 1.0));
-              d = max(d, sparse * 0.5);
               // edge erosion: high-frequency wisps carve the surface (fades
               // out with distance so far samples stay smooth); hf cells are
               // 640 m — same physical wind divided by that cell size
               float hf = fbm3o(p * (1.0 / 640.0) + wind * (1.0 / 640.0) * vec3(-1.7, 1.0, 0.8), detail * detail);
               d -= (1.0 - d) * hf * 0.35;
-              // vertical shaping: rounded bases, domed tops. The old
-              // smoothstep(0,0.18,h) left the bottom 430 m of the slab
-              // guaranteed-empty — from below, looking up through that
-              // dead zone plus thin bases, the deck vanished entirely.
-              // 0.06 keeps rounded bases but starts puffs at ~145 m.
-              d *= smoothstep(0.0, 0.06, h) * (0.55 + 0.45 * smoothstep(1.0, 0.55, h));
+              // M11n9: the vertical shaping now lives in cloudDensity's vert
+              // (base + tower profile) — the old deck-only shaping removed
               d = clamp(d * 1.5, 0.0, 1.0);
               if (d > 0.015) {
                 // light march: 3 samples toward the sun (cheap 1-octave billow)
@@ -817,7 +791,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                 // below were rendering luma ~100 (near-black underbellies).
                 shadow = 0.45 + 0.55 * shadow;
                 vec3 lit = vec3(1.0, 0.98, 0.95) * shadow * phase * (0.55 + 0.45 * powder)
-                         + vec3(0.62, 0.68, 0.80) * (0.55 + 0.35 * h); // sky ambient
+                         + vec3(0.62, 0.68, 0.80) * (0.55 + 0.35 * clamp(cloudHeightE(p), 0.0, 1.2)); // sky ambient
                 float aStep = 1.0 - exp(-d * dt * 0.005); // extinction tuned
                 // to the far shell's opacity (1-exp(-d*12)): with k=0.0022
                 // a full column only reached alpha≈0.4 — the deck stayed
@@ -886,7 +860,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
       }
     `;
   const nearGeo = new THREE.SphereGeometry(planetR + 2600, 128, 96);
-  const farGeo = new THREE.SphereGeometry(planetR + Math.max(CLOUD_TOP, 9800), 128, 96);
+  // M11n9: the far shell sits at 12 km — the cumulonimbus TOWER TOP — so
+  // the far map's parallax matches the towers the march draws
+  const farGeo = new THREE.SphereGeometry(planetR + 12000, 128, 96);
   // M11m3 OWNERSHIP FIX: the injections were INVERTED — the near hull
   // drew the shell map and the far hull the march, so from orbit the SAME
   // deck painted twice (far hull at R+9.8 km + a copy on the R+2.6 km
