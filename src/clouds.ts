@@ -884,7 +884,11 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                                   clamp(abs(dot(rd, up0)) * 10.0, 0.0, 1.0)));
             // step count scales with the marched span so the sample
             // density stays ~1 km/step in every direction
-            int steps = int(clamp(uVolSteps * (t1 - t0) / 18000.0, 12.0, 32.0));
+            // M11n9t PERF: 32 -> 24 cap. Inside the deck the whole screen
+            // marches and the frame rate fell to ~6 fps; 24 steps at 1.3
+            // km spacing is visually indistinguishable in a broad soft
+            // deck (the IGN dither hides the coarser quantization).
+            int steps = int(clamp(uVolSteps * (t1 - t0) / 18000.0, 12.0, 24.0));
             dbgT0 = t0; dbgSpan = (t1 - t0) / 18000.0; dbgSteps = float(steps) / 48.0;
             // cap the marched path: grazing rays through the slab would
             // accumulate alpha=1 over hundreds of km and read as a gray
@@ -985,34 +989,51 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // edge erosion: high-frequency wisps carve the surface (fades
               // out with distance so far samples stay smooth); hf cells are
               // 640 m — same physical wind divided by that cell size
-              float hf = fbm3o(p * (1.0 / 640.0) + wind * (1.0 / 640.0) * vec3(-1.7, 1.0, 0.8), detail * detail);
-              d -= (1.0 - d) * hf * 0.35;
+              // M11n9t PERF: skip entirely for far samples (detail < 0.55 =
+              // t > 6.6 km) — the erosion amplitude is already faded to
+              // < 55% there and the fbm3o is 3 noise evals per step
+              if (detail > 0.55) {
+                float hf = fbm3o(p * (1.0 / 640.0) + wind * (1.0 / 640.0) * vec3(-1.7, 1.0, 0.8), detail * detail);
+                d -= (1.0 - d) * hf * 0.35;
+              }
               // M11n9: the vertical shaping now lives in cloudDensity's vert
               // (base + tower profile) — the old deck-only shaping removed
               d = clamp(d * 1.5, 0.0, 1.0);
               if (d > 0.015) {
                 // light march: 3 samples toward the sun (cheap 1-octave billow)
+                // M11n9t PERF: tail steps (volT < 0.12) skip the light
+                // march — their contribution is aStep·volT ≲ 0.06·lit, so
+                // a constant mid-shadow replaces 9 noise evals invisibly.
                 float od = 0.0;
-                for (int j = 1; j <= 3; j++) {
-                  vec3 pl = p + uSunDir * (float(j) * 220.0);
-                  float fl = fbm3o(pl * (1.0 / 3000.0) + wind * (1.0 / 3000.0), 1.0);
+                float shadow;
+                if (volT > 0.12) {
+                  // M11n9t PERF: 1 light sample instead of 3 — the old
+                  // samples sat 220 m apart inside a 3 km noise lattice,
+                  // so they read nearly the same field value: 3x the cost
+                  // for ~1 sample of information. One 400 m sample with
+                  // the od scale matched (700 = the old 3x220 range) keeps
+                  // the same shadow depth.
+                  vec3 pl = p + uSunDir * 400.0;
+                  float fl = noise3(pl * (1.0 / 3000.0) + wind * (1.0 / 3000.0));
                   float bl = 1.0 - abs(2.0 * fl - 1.0);
                   // same threshold family as cloudDensity (M11n8b: mix(0.41,0.35)):
                   float thrS = mix(0.41, 0.35, cover);
-                  od += smoothstep(thrS, thrS + 0.18, bl * (0.72 + 0.28 * cover)) * 220.0;
+                  od += smoothstep(thrS, thrS + 0.18, bl * (0.72 + 0.28 * cover)) * 700.0;
+                  shadow = exp(-od * 0.0008);     // Beer-Lambert, gentler:
+                  // 0.0012/0.004 history — interior samples went near-black
+                  // from orbit and the near-view deck read PALE GRAY next to
+                  // the far shell's bright map (the handoff mismatch).
+                  // tops catch the sun: height-based ambient brightening.
+                  // Sun term floored higher + whiter ambient: the near-view
+                  // deck must match the far shell's white, or the LOD
+                  // handoff reads as the clouds fading (user report).
+                  // 0.45 floor on shadow + stronger ambient: bases seen from
+                  // below were rendering luma ~100 (near-black underbellies).
+                  shadow = 0.45 + 0.55 * shadow;
+                } else {
+                  shadow = 0.70;
                 }
-                float shadow = exp(-od * 0.0008);     // Beer-Lambert, gentler:
-                // 0.0012/0.004 history — interior samples went near-black
-                // from orbit and the near-view deck read PALE GRAY next to
-                // the far shell's bright map (the handoff mismatch).
                 float powder = 1.0 - exp(-d * 4.0);   // dark edges, bright cores
-                // tops catch the sun: height-based ambient brightening.
-                // Sun term floored higher + whiter ambient: the near-view
-                // deck must match the far shell's white, or the LOD
-                // handoff reads as the clouds fading (user report).
-                // 0.45 floor on shadow + stronger ambient: bases seen from
-                // below were rendering luma ~100 (near-black underbellies).
-                shadow = 0.45 + 0.55 * shadow;
                 // M11n9e: sunset tint — near the terminator the direct sun
                 // term turns warm orange and the sky ambient turns dusk
                 // red-purple (the old fixed white/blue lit the towers the
