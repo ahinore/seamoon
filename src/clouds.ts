@@ -584,6 +584,19 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // The far hull always computes: above 12 km it owns the full map,
         // below it owns the horizon band (see the in-zone gate inside).
         if (uNearHull < 0.5) {
+          // M11n9t2 PERF early-out: in-zone only the horizon band's pixels
+          // can show shell clouds (zoneBand gates the density to the band);
+          // off-zone wShell owns the full map. When both weights are ~0 the
+          // whole block — 6+ noise evals plus the 2-sample fog march —
+          // would be pure waste per pixel, and inside the deck / on the
+          // ground that is most of the screen. The gates need only rd/ro/
+          // camAlt (cheap trig), so they hoist above the block; the inner
+          // code reuses them.
+          float elevR = asin(clamp(dot(rd, normalize(ro)), -1.0, 1.0));
+          float bandGate = 1.0 - smoothstep(0.035, 0.075, elevR);
+          float overlap = mix(0.45, 1.0, smoothstep(4000.0, 12000.0, camAlt));
+          float zoneBand = (1.0 - smoothstep(11000.0, 13000.0, camAlt)) * bandGate * overlap;
+          if (wShell > 0.001 || zoneBand > 0.001) {
           // M11n6c PARALLAX FIX: the shell paints its clouds at the
           // fragment's own direction (upF) on the R+9.8 km shell, but the
           // clouds it depicts live in the 1.8-4.2 km slab. Along a view ray
@@ -691,10 +704,8 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // toward the handoff — near (march) and far (shell band) OVERLAP
           // on the horizon strip and the far band thins gradually while
           // descending, instead of vanishing at 11 km (the cloudless gap).
-          float elevR = asin(clamp(dot(rd, normalize(ro)), -1.0, 1.0));
-          float bandGate = 1.0 - smoothstep(0.035, 0.075, elevR);
-          float overlap = mix(0.45, 1.0, smoothstep(4000.0, 12000.0, camAlt));
-          float zoneBand = (1.0 - smoothstep(11000.0, 13000.0, camAlt)) * bandGate * overlap;
+          // (elevR/bandGate/overlap/zoneBand hoisted to the block's early-
+          // out gate — M11n9t2.)
           d *= max(smoothstep(11000.0, 13000.0, camAlt), zoneBand);
           // M11n9q HORIZON WALL: the strip between the deck's visual edge
           // (~244 km from 8.9 km) and the true horizon (~340 km) shows the
@@ -810,6 +821,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             shellCol += vec3(0.85, 0.92, 1.0) * flashS * tower * 2.5;
             shellA = max(shellA, flashS * tower * 0.85 * max(wShell, zoneBand));
           }
+          } // M11n9t2 early-out if
           }
         }
 
