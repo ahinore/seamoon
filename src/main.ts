@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CameraRig } from './cameraRig';
 import { PlanetView } from './cubeSphereLod';
-import { makePlanetMaterial, makeSeaMaterial, makeStars, makeSunDisc } from './materials';
+import { makePlanetMaterial, makeSeaMaterial, makeStars, makeSunDisc, makeMilkyWay } from './materials';
 import { makeAtmosphereMesh, makeAtmosphereUniforms } from './atmosphere';
 import { makeCloudMesh, makeCloudUniforms } from './clouds';
 import { Hud } from './hud';
@@ -156,6 +156,8 @@ if (urlParams.get('detail') === '0') {
   material.uniforms.uDetail.value = 0;
 }
 const stars = makeStars(6000, 6e8);
+// M11n9u: the milky way band under the star points — same galactic plane
+scene.add(makeMilkyWay(6e8));
 scene.add(stars);
 // Sun disc (M9.4): placed along sunDir at a fixed camera distance each frame
 // (inside the far plane; stars are at 6e8 so the sun sits well inside them).

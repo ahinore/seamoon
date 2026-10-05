@@ -652,6 +652,67 @@ export function makeStars(count = 6000, radius = 6e8): THREE.Points {
 }
 
 /**
+ * Milky Way band (M11n9u): a faint diffuse glow along the same galactic
+ * plane the star density uses, with mottled star-cloud structure and the
+ * dark dust rift. Additive on a BackSide sky sphere at the star radius —
+ * drawn at renderOrder -11, just before the star points (-10). Cheap:
+ * 2-octave hash value noise per pixel, no texture.
+ */
+export function makeMilkyWay(radius = 6e8): THREE.Mesh {
+  const geo = new THREE.SphereGeometry(radius, 32, 16);
+  const m = new THREE.ShaderMaterial({
+    uniforms: { uBandN: { value: new THREE.Vector3(0.2, 0.95, 0.35).normalize() } },
+    transparent: true,
+    depthWrite: false,
+    side: THREE.BackSide,
+    blending: THREE.AdditiveBlending,
+    vertexShader: /* glsl */ `
+      varying vec3 vDir;
+      void main() {
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uBandN;
+      varying vec3 vDir;
+      float h31(vec3 p) {
+        return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+      }
+      float vnoise(vec3 p) {
+        vec3 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        float n000 = h31(i), n100 = h31(i + vec3(1, 0, 0));
+        float n010 = h31(i + vec3(0, 1, 0)), n110 = h31(i + vec3(1, 1, 0));
+        float n001 = h31(i + vec3(0, 0, 1)), n101 = h31(i + vec3(1, 0, 1));
+        float n011 = h31(i + vec3(0, 1, 1)), n111 = h31(i + vec3(1, 1, 1));
+        return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+                   mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+      }
+      void main() {
+        vec3 d = normalize(vDir);
+        float ang = asin(clamp(abs(dot(d, uBandN)), 0.0, 1.0));
+        // narrow core + wider halo (the band is not a gaussian strip)
+        float core = exp(-(ang * ang) / (0.055 * 0.055));
+        float halo = exp(-(ang * ang) / (0.16 * 0.16));
+        // mottled star-cloud structure along the band + dark dust rift
+        float cl = vnoise(d * 7.0) * 0.6 + vnoise(d * 17.0) * 0.4;
+        float dust = vnoise(d * 11.0 + vec3(4.7, 1.3, 8.9));
+        float rift = smoothstep(0.30, 0.55, dust) * core;
+        float glow = (core * (0.10 + 0.16 * cl) + halo * (0.03 + 0.05 * cl)) * (1.0 - 0.75 * rift);
+        vec3 col = mix(vec3(0.85, 0.90, 1.0), vec3(1.0, 0.95, 0.85), cl);
+        gl_FragColor = vec4(col * glow, 1.0);
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+  const mesh = new THREE.Mesh(geo, m);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -11;
+  return mesh;
+}
+
+/**
  * Sun disc (Phase 9 M9.4): a camera-facing quad with an analytic disk and a
  * subtle glare, positioned along the sun direction every frame (inside the
  * far plane). Depth-tested, so the planet occludes it naturally; additive so
