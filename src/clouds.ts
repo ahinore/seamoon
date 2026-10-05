@@ -579,9 +579,11 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         vec3 shellCol = vec3(0.0);
         float shellA = 0.0;
         float shellAraw = 0.0; // M11n9c: shell alpha without the altitude weight — the far-band fill uses it
-        // M11n9c gate: the NEAR hull computes the shell map below 12 km (its
-        // far-band fill needs it); the FAR hull computes it when it paints
-        if ((uNearHull > 0.5 && camAlt < 12000.0) || (uNearHull < 0.5 && wShell > 0.0001)) {
+        // M11n9o: the shell block runs on the FAR HULL ONLY now — the near
+        // hull is march-only (its shell contributions are zeroed below).
+        // The far hull always computes: above 12 km it owns the full map,
+        // below it owns the horizon band (see the in-zone gate inside).
+        if (uNearHull < 0.5) {
           // M11n6c PARALLAX FIX: the shell paints its clouds at the
           // fragment's own direction (upF) on the R+9.8 km shell, but the
           // clouds it depicts live in the 1.8-4.2 km slab. Along a view ray
@@ -683,15 +685,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float body = smoothstep(0.55, 0.66, bodyN);
           float towerN = noise3(spF * (1.0 / 9000.0) + wind * (1.0 / 9000.0));
           float tower = smoothstep(0.60, 0.75, towerN);
-          // M11n9n: the shell paints NOTHING below 12 km camera altitude —
-          // final. The march fills the whole in-zone view including the
-          // horizon band (measured 100% white with the march alone); the
-          // shell's 2D map added a second, different pattern on top of
-          // the march's clouds (user report: "near clouds missing at the
-          // horizon, far clouds drawn instead" — the shell overwrote the
-          // march's band with its own map). Above 12 km the full map
-          // applies.
-          d *= smoothstep(11000.0, 13000.0, camAlt);
+          // M11n9o CROSS-FADE: above 12 km the full map; below it the shell
+          // keeps painting only the HORIZON BAND (ray elevation < ~4 deg —
+          // the distant regions' tower tops), with an opacity that ramps up
+          // toward the handoff — near (march) and far (shell band) OVERLAP
+          // on the horizon strip and the far band thins gradually while
+          // descending, instead of vanishing at 11 km (the cloudless gap).
+          float elevR = asin(clamp(dot(rd, normalize(ro)), -1.0, 1.0));
+          float bandGate = 1.0 - smoothstep(0.035, 0.075, elevR);
+          float overlap = mix(0.45, 1.0, smoothstep(4000.0, 12000.0, camAlt));
+          float zoneBand = (1.0 - smoothstep(11000.0, 13000.0, camAlt)) * bandGate * overlap;
+          d *= max(smoothstep(11000.0, 13000.0, camAlt), zoneBand);
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // M11n9e: sunset tint on the far map (matches the march's tint)
           vec3 shellTint = mix(vec3(1.0, 0.48, 0.25), vec3(1.0),
@@ -724,10 +728,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // d 0.2-0.5 regions were 30-80% see-through, compositing the dark
           // ground into a warm-gray dot).
           shellA = 1.0 - exp(-d * 12.0);
-          // M11n9l: shellAraw is 0 when the gate zeroes d (in-zone) — the
-          // far-band fill must not paint a gray veil from an empty map
-          shellAraw = (1.0 - exp(-d * 12.0)) * step(0.0001, d);
-          shellA *= wShell;
+          // M11n9o: the shell's weight — full above the handoff; in-zone
+          // the horizon band's own overlap weight (wShell is 0 there)
+          shellA *= max(wShell, zoneBand);
           // night fade (same terms as the volumetric path)
           float sunHs = dot(up0, uSunDir);
           shellCol *= smoothstep(-0.12, 0.08, sunHs);
@@ -1015,31 +1018,18 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           }
         }
 
-        // ---------------- composite (shell + volumetric) ----------------
-        // M11n9c: two-layer composite. The march paints 0-40 km along the
-        // ray; the far shell paints the ray's distant crossing (200-300 km
-        // for horizon rays from inside the zone). The old complementary
-        // weights (aV·wVol + aS·(1-wVol)) zeroed the shell below 8 km, so
-        // the distant band the march can't reach stayed empty — the clear
-        // strip at the horizon from inside the cloud zone (user report).
-        // The far-band fill (shellAraw gated to the 5-6.5 km+ band, march
-        // primary only) fills exactly those gaps over-composited behind
-        // the march's clouds.
-        float aV = 1.0 - volT;            // march coverage (already wVol-scaled below)
-        // M11n9c: the near hull's primary shell contribution is suppressed
-        // (the far hull owns the shell map above the march's reach); the
-        // near hull uses shellAraw only through the far-band fill
-        float aS = shellA * mix(1.0, 0.0, uNearHull);
-        float covP = clamp(aV * wVol + aS * (1.0 - wVol), 0.0, 1.0);
-        vec3 colP = covP > 0.0001
-          ? (volCol * wVol + shellCol * (1.0 - wVol) * (1.0 - uNearHull)) / max(wVol + (1.0 - wVol), 0.0001)
-          : vec3(0.0);
-        // far-band fill: active when the march is the primary painter and
-        // the camera sits above the base deck top (where horizon rays
-        // leave the deck and need the distant regions filled)
-        float shellFar = shellAraw * smoothstep(5000.0, 6500.0, camAlt) * wVol;
-        float cov = clamp(covP + shellFar * (1.0 - covP), 0.0, 1.0);
-        vec3 col = (colP * covP + shellCol * shellFar * (1.0 - covP)) / max(cov, 0.0001);
+        // ---------------- composite (hull-specific) ---------------------
+        // M11n9o: the near hull is MARCH ONLY (its color stays full-bright
+        // and the handoff fade is carried by alpha alone — the old
+        // wVol-scaled color double-faded dark); the far hull is SHELL ONLY.
+        // The handoff overlap: the far hull's horizon band (see the in-zone
+        // gate) fills the strip the march's cap can't reach and thins
+        // gradually as the march fades in — no cloudless gap.
+        float aV = 1.0 - volT; // march coverage (probe/debug channel)
+        float cov = uNearHull > 0.5
+          ? clamp(aV * wVol, 0.0, 1.0)
+          : clamp(shellA, 0.0, 1.0);
+        vec3 col = uNearHull > 0.5 ? volCol : shellCol;
         float alpha = cov;
         // altitude-based opacity fade inside the band (flying through).
         // Floor 0.55 (was 0.35): inside/near the slab the deck used to dim
