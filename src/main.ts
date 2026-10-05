@@ -9,6 +9,7 @@ import { AutoPilot } from './testAuto';
 import { FlightModel } from './flight';
 import { WorldOrigin } from './world';
 import { makeMoonMaterial } from './moonMaterial';
+import { buildMoonFallbackGeometry } from './moon';
 import { moonPosition, moonPositionAtAngle } from './moonOrbit';
 import { MOON_BODY } from './moonBody';
 import { EARTH, MOON, nearestFrame } from './frames';
@@ -249,6 +250,22 @@ const moonView = new PlanetView(scene, R_MOON, moonMaterial, {
   grazingBoost: 5,
   }, MOON_BODY);
 if (urlParams.get('moon') === '0') moonView.root.visible = false;
+// M11n9r: global fallback sphere under the moon's tile quadtree — the
+// grazing horizon band renders guaranteed terrain instead of void when
+// the build budget can't fill the ring (the black band). The material is
+// cloned so the fallback can carry its own polygon offset; the shared
+// uniforms the clone deep-copied are re-pointed at the originals so the
+// sun direction and the floodlight stay in sync.
+const moonFallbackMat = moonMaterial.clone();
+moonFallbackMat.uniforms.uSunDir = atmoUniforms.uSunDir;
+moonFallbackMat.uniforms.uLampPos = moonMaterial.uniforms.uLampPos;
+moonFallbackMat.uniforms.uLampOn = moonMaterial.uniforms.uLampOn;
+moonFallbackMat.side = THREE.FrontSide; // a closed sphere seen from outside
+moonFallbackMat.polygonOffset = true; // extra depth push: tiles always win
+moonFallbackMat.polygonOffsetFactor = 2;
+const moonFallback = new THREE.Mesh(buildMoonFallbackGeometry(), moonFallbackMat);
+moonFallback.renderOrder = -3; // after sun disc (-5), before tiles (0)
+moonView.root.add(moonFallback);
 // sim clock for the orbit (performance.now-based; deterministic per session)
 const t0Sim = performance.now() / 1000;
 

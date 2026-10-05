@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { fbm3, ridged3, hash3i } from './noise';
 
 /**
@@ -162,4 +163,106 @@ export function moonColor(
   const g = b * (1 - mareMask * 0.36);
   const bl = b * (1 - mareMask * 0.28);
   return [r, g, bl];
+}
+
+/**
+ * M11n9r: global fallback sphere for the moon — the black-band safety net.
+ *
+ * The quadtree's build/evict budget cannot always fill the grazing horizon
+ * ring (from 15 km up the ring sits ~230 km out and wants deep levels for
+ * every compass bearing), so the band rendered as bare black background.
+ * This coarse displaced sphere — same moonHeight/moonColor functions, ~109
+ * km quads at res 32/face — renders BENEATH the tiles as a guaranteed
+ * surface: the band reads as distant terrain instead of void, and the far
+ * side of the moon always exists for orbit views.
+ *
+ * A 3 km inset keeps the fallback strictly below the tile surfaces: 24-bit
+ * depth precision at the band's 200+ km distance is ~1 km, so without the
+ * inset the coincident surfaces would z-fight (the fallback winning would
+ * smear low-res terrain over near tiles). Where a crater bowl dips deeper
+ * than the inset the bowl's own tile geometry is between the camera and
+ * the fallback, so nothing shows through.
+ */
+export function buildMoonFallbackGeometry(resPerFace = 32, inset = 3000): THREE.BufferGeometry {
+  // cube face axes: [normal, u, v] — right-handed per face
+  const n = new THREE.Vector3();
+  const u = new THREE.Vector3();
+  const v = new THREE.Vector3();
+  const faces: [number[], number[], number[]][] = [
+    [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    [[-1, 0, 0], [0, 1, 0], [0, 0, -1]],
+    [[0, 1, 0], [0, 0, 1], [1, 0, 0]],
+    [[0, -1, 0], [0, 0, -1], [1, 0, 0]],
+    [[0, 0, 1], [1, 0, 0], [0, 1, 0]],
+    [[0, 0, -1], [-1, 0, 0], [0, 1, 0]],
+  ];
+  const R = R_MOON;
+  const res = resPerFace;
+  const vertsPerFace = (res + 1) * (res + 1);
+  const total = vertsPerFace * 6;
+  const pos = new Float32Array(total * 3);
+  const nrm = new Float32Array(total * 3);
+  const col = new Float32Array(total * 3);
+  const grid = new Float32Array(total * 3);
+  const ctr = new Float32Array(total * 3);
+  const idx = new Uint32Array(res * res * 6 * 6);
+  const dir = new THREE.Vector3();
+  let vi = 0;
+  for (let f = 0; f < 6; f++) {
+    n.fromArray(faces[f][0]); u.fromArray(faces[f][1]); v.fromArray(faces[f][2]);
+    const base = f * vertsPerFace;
+    for (let j = 0; j <= res; j++) {
+      for (let i = 0; i <= res; i++) {
+        const su = -1 + (2 * i) / res;
+        const sv = -1 + (2 * j) / res;
+        dir.copy(n).addScaledVector(u, su).addScaledVector(v, sv).normalize();
+        const dx = dir.x, dy = dir.y, dz = dir.z;
+        const h = moonHeight(dx, dy, dz, 0);
+        const r = R + h - inset;
+        pos[vi * 3] = dx * r; pos[vi * 3 + 1] = dy * r; pos[vi * 3 + 2] = dz * r;
+        const [cr, cg, cb] = moonColor(dx, dy, dz, h, 0);
+        col[vi * 3] = cr; col[vi * 3 + 1] = cg; col[vi * 3 + 2] = cb;
+        grid[vi * 3] = 0; grid[vi * 3 + 1] = 0; grid[vi * 3 + 2] = 0;
+        ctr[vi * 3] = dx * R; ctr[vi * 3 + 1] = dy * R; ctr[vi * 3 + 2] = dz * R;
+        vi++;
+      }
+    }
+    for (let j = 0; j < res; j++) {
+      for (let i = 0; i < res; i++) {
+        const a = base + j * (res + 1) + i;
+        const b = a + 1;
+        const c = a + res + 1;
+        const d = c + 1;
+        let k = (f * res * res + j * res + i) * 6;
+        idx[k++] = a; idx[k++] = c; idx[k++] = b;
+        idx[k++] = b; idx[k++] = c; idx[k++] = d;
+      }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setAttribute('aGrid', new THREE.BufferAttribute(grid, 3));
+  geo.setAttribute('center', new THREE.BufferAttribute(ctr, 3));
+  geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  geo.computeVertexNormals();
+  // weld normals across the 12 cube-face seams: computeVertexNormals leaves
+  // duplicated border vertices with one-sided normals — average the
+  // duplicates so no shading seams stripe the fallback sphere
+  const weld = new Map<string, number[]>();
+  const key = (x: number, y: number, z: number) =>
+    `${Math.round(x / 500)},${Math.round(y / 500)},${Math.round(z / 500)}`;
+  for (let i = 0; i < total; i++) {
+    const k = key(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+    let e = weld.get(k);
+    if (!e) { e = [0, 0, 0, i]; weld.set(k, e); }
+    e[0] += nrm[i * 3]; e[1] += nrm[i * 3 + 1]; e[2] += nrm[i * 3 + 2];
+  }
+  weld.forEach((e) => {
+    const len = Math.hypot(e[0], e[1], e[2]) || 1;
+    for (let c = 0; c < 3; c++) nrm[e[3] * 3 + c] = e[c] / len;
+  });
+  geo.getAttribute('normal').needsUpdate = true;
+  return geo;
 }
