@@ -337,6 +337,10 @@ window.addEventListener('resize', () => {
 const fmtDist = (m: number): string =>
   m >= 1e6 ? (m / 1e6).toFixed(2) + ' Mm' : m >= 1e4 ? (m / 1e3).toFixed(1) + ' km' : m.toFixed(1) + ' m';
 
+// M11n9k: visible version tag — bump on every cloud/renderer change so a
+// stale cached module is instantly obvious in screenshots
+const SIM_VERSION = 'sim v11.9k-aerial';
+
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
 
@@ -720,6 +724,7 @@ for (let i = 0; i < speedup; i++) {
   const moonDist = MOON.center.length() - R_MOON;
   hud.update([
     ...errors.slice(-3),
+    SIM_VERSION,
     ...(autoLine ? [autoLine] : []),
     ...(rig.stickMode ? [flight.statusLine()] : []),
     ...flight.missionSummary(),

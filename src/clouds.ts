@@ -471,6 +471,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
 
         // ---------------- weather / coverage ----------------
         vec3 upF = normalize(vWorld - pc);
+        // M11n9k: the ray's TRUE distance to the slab-mid crossing — the
+        // shell map's clouds live there, NOT at the hull fragment's own
+        // position (the near hull follows the camera, so its fragments are
+        // only 2.6 km away while the mapped clouds are 100-300 km out).
+        // The aerial-perspective fog must use this distance or the far
+        // wisps stay crisp (user report: the wisps survived the M11n9k fog).
+        float cloudDist = -1.0;
         // Weather anchor: the direction where the ray MEETS THE SLAB, not
         // the fragment's own sky direction. From below/at deck level the
         // shell fragment sits 10-60 km up-sky from the actual march column
@@ -489,7 +496,10 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           if (hq >= 0.0) {
             float sq = sqrt(hq);
             float tMid = (-b - sq) > 0.0 ? (-b - sq) : (-b + sq);
-            if (tMid > 0.0) upW = normalize(ro + rd * tMid);
+            if (tMid > 0.0) {
+              upW = normalize(ro + rd * tMid);
+              cloudDist = tMid; // M11n9k: the true mapped-cloud distance
+            }
           }
         }
         vec3 q = upW * 2.2; // weather scale ~ R/2.2
@@ -709,7 +719,11 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // distance, 2-sample sun od) the far band fades into the haze
           // instead. Cloud uniforms share the atmosphere's betas.
           {
-            float distS = distance(uCamPos, vWorld);
+            // M11n9k fix: the fog distance is the TRUE mapped-cloud distance
+            // (the slab crossing, up to 300 km for horizon rays) — the hull
+            // fragment's own position is only 2.6 km away (the near hull
+            // follows the camera) and using it left the far wisps crisp
+            float distS = cloudDist > 0.0 ? cloudDist : distance(uCamPos, vWorld);
             vec3 midS = ro + rd * (distS * 0.5);
             float hgtS = max(length(midS) - uPlanetR, 0.0);
             float dRS = exp(-hgtS / uHR) * distS;
