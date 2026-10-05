@@ -728,6 +728,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // d 0.2-0.5 regions were 30-80% see-through, compositing the dark
           // ground into a warm-gray dot).
           shellA = 1.0 - exp(-d * 12.0);
+          // M11n9p HULL-PROXIMITY FADE: the far hull is a 2D surface —
+          // as the camera approaches its 12 km radius the polygon edges
+          // and the flat sheet become visible (user screenshot at 10.2 km,
+          // 1.8 km below the hull). Fade the shell out as the fragment's
+          // distance to the camera shrinks: full opacity beyond 4 km,
+          // fully transparent within 1.2 km of the surface. Rays that
+          // pierce the surface near the camera (looking up from below the
+          // hull) fade the same way, so the hull is invisible at the
+          // moment of crossing.
+          float fragDist = distance(uCamPos, vWorld);
+          shellA *= smoothstep(1200.0, 4000.0, fragDist);
           // M11n9o: the shell's weight — full above the handoff; in-zone
           // the horizon band's own overlap weight (wShell is 0 there)
           shellA *= max(wShell, zoneBand);
