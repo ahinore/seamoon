@@ -743,7 +743,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // YELLOW= d mid-range (partial deck)
           // WHITE = fully cloudy
           if (uCloudDbg > 0.5) {
-            float sunHd = dot(up0, uSunDir);
+            float sunHd = dot(upF, uSunDir); // M11n9v4: per-fragment, not the camera's
             vec3 dbg = vec3(1.0); // white base (cloudy)
             if (gate < 0.5) dbg = vec3(0.1, 0.9, 0.1);          // gate hole
             else if (sys < thr) dbg = vec3(0.9, 0.1, 0.1);      // sys hole
@@ -756,7 +756,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // Density-driven color: thick cores read warm-white, thin edges
           // cool gray-blue — matches how the volumetric deck shades, and
           // keeps the shell from reading as one flat cream sheet.
-          shellCol = mix(vec3(0.72, 0.76, 0.82), vec3(1.02, 1.0, 0.97), smoothstep(0.05, 0.6, d)) * shellShade * shellTint;
+          // M11n9v4 CLIP-CONTOUR FIX: the 1.02 peak pushed the sunlit cores
+          // past the display's saturation knee — the smooth shade field then
+          // clipped along its contours, drawing wedge-shaped saturated
+          // patches that popped around as the camera moved (the user's
+          // "white fragments"). Peak below the knee keeps the shading smooth.
+          shellCol = mix(vec3(0.72, 0.76, 0.82), vec3(0.965, 0.945, 0.915), smoothstep(0.05, 0.6, d)) * shellShade * shellTint;
           // Opacity calibrated to the volumetric march it replaces: marching
           // the full ~2.4 km slab accumulates ~1-exp(-d * 6). The old k=2600
           // saturated EVERY pixel to opaque (uniform cream sheet from orbit).
@@ -788,8 +793,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // M11n9o: the shell's weight — full above the handoff; in-zone
           // the horizon band's own overlap weight (wShell is 0 there)
           shellA *= max(wShell, zoneBand);
-          // night fade (same terms as the volumetric path)
-          float sunHs = dot(up0, uSunDir);
+          // M11n9v4 NIGHT-FADE SCOPE FIX: the fade keyed on the CAMERA's sun
+          // elevation (dot(up0, uSunDir)) and darkened EVERY fragment
+          // uniformly. Near the terminator the far deck fragments (85-600 km
+          // away) fall on the NIGHT side while the near deck stays lit — the
+          // far band went dark gray-blue with a hard, wavy boundary against
+          // the lit deck (the user's "fragments that appear at certain
+          // heights and positions"). Key the fade to the FRAGMENT's own sun
+          // elevation so the terminator sweeps the deck continuously.
+          float sunHs = dot(upF, uSunDir);
           shellCol *= smoothstep(-0.12, 0.08, sunHs);
           shellA *= smoothstep(-0.25, 0.0, sunHs) * 0.98 + 0.02;
           // M11n9k AERIAL PERSPECTIVE: distant shell clouds wash into the
@@ -822,8 +834,16 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             float phMS = 3.0 / (8.0 * 3.14159) * ((1.0 - gS*gS)*(1.0+muS*muS)) / ((2.0+gS*gS)*pow(1.0+gS*gS-2.0*gS*muS, 1.5));
             vec3 inscS = (vec3(dRS * uBetaR.x, dRS * uBetaR.y, dRS * uBetaR.z) * phRS + dMS * uBetaM * phMS)
                        * exp(-odSunS) * smoothstep(-0.15, 0.1, sunHs3);
+            // M11n9v4 EXPOSURE MATCH: fade the deck into the same haze the
+            // atmosphere shell paints — the shell renders its inscatter with
+            // a 6x gain + Reinhard shoulder, and the old raw target left the
+            // horizon deck darker than the sky behind it. The fog's distance
+            // ramp compresses to a few pixels near the horizon, so the dark
+            // band met the lit deck along a hard, wedge-shaped boundary (the
+            // user's "fragments that appear at certain heights/positions").
+            vec3 hazeS = inscS * 6.0 / (1.0 + 2.2 * inscS);
             float fogS = clamp(1.0 - exp(-min(dRS * uBetaR.x + dMS * uBetaM.x, 12.0)), 0.0, 1.0);
-            shellCol = mix(shellCol, inscS * 1.15, min(fogS, 0.85));
+            shellCol = mix(shellCol, hazeS, min(fogS, 0.85));
           }
           // M11n9s DISTANT LIGHTNING: the shell's tower band flashes too —
           // far storms on the horizon pulse blue-white (unmistakable at
@@ -1193,10 +1213,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           #include <colorspace_fragment>
           return;
         }
-        // night fade
+        // night fade — M11n9v4: the near hull (march) still needs the global
+        // gate; the far hull's shell already faded per-fragment with upF
+        // (double-applying the camera-keyed fade here was part of the
+        // terminator dark-band bug).
         float sunH = dot(up0, uSunDir);
-        col *= smoothstep(-0.12, 0.08, sunH);
-        alpha *= smoothstep(-0.25, 0.0, sunH) * 0.98 + 0.02;
+        if (uNearHull > 0.5) {
+          col *= smoothstep(-0.12, 0.08, sunH);
+          alpha *= smoothstep(-0.25, 0.0, sunH) * 0.98 + 0.02;
+        }
 
         gl_FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
         #include <colorspace_fragment>
@@ -1205,6 +1230,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
   const nearGeo = new THREE.SphereGeometry(planetR + 2600, 128, 96);
   // M11n9: the far shell sits at 12 km — the cumulonimbus TOWER TOP — so
   // the far map's parallax matches the towers the march draws
+  // (512x384 tessellation was trialed for the wedge artifact and gave
+  // identical frames — the cause was the night-fade/clip contour, not
+  // chord interpolation — so the cheap 128x96 stays.)
   const farGeo = new THREE.SphereGeometry(planetR + 12000, 128, 96);
   // M11m3 OWNERSHIP FIX: the injections were INVERTED — the near hull
   // drew the shell map and the far hull the march, so from orbit the SAME

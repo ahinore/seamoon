@@ -144,6 +144,11 @@ const sea = new PlanetView(scene, R, seaMaterial, {
 if (urlParams.get('sea') === '0') {
   sea.root.visible = false;
 }
+// ?nocull=1: test hook — disable the tile frustum cull (mis-cull diagnosis)
+if (urlParams.get('nocull') === '1') {
+  (planet as unknown as { o: { noFrustumCull?: boolean } }).o.noFrustumCull = true;
+  (sea as unknown as { o: { noFrustumCull?: boolean } }).o.noFrustumCull = true;
+}
 // M10.3: ?tonemap=0 disables the in-shader ACES curve (A/B diagnosis).
 const tonemapOn = urlParams.get('tonemap') !== '0';
 if (!tonemapOn) {
@@ -220,11 +225,12 @@ if (urlParams.has('abshot')) {
 let __flightExposed = false;
 // ?cloudbg=1: color-code which term suppresses the far deck (red = fbm
 // below threshold, green = weather gate, yellow = partial). 2 = march
-// probe for the below-deck view.
-if (urlParams.get('cloudbg') === '1') cloudUniforms.uCloudDbg.value = 1;
-if (urlParams.get('cloudbg') === '2') cloudUniforms.uCloudDbg.value = 2;
-if (urlParams.get('cloudbg') === '3') cloudUniforms.uCloudDbg.value = 3;
-if (urlParams.get('cloudbg') === '4') cloudUniforms.uCloudDbg.value = 4;
+// probe for the below-deck view. Floats pass straight through for the
+// shader-side probes (2.5 / 6 / 7.5 ...).
+{
+  const cdb = parseFloat(urlParams.get('cloudbg') ?? '0');
+  if (cdb > 0) cloudUniforms.uCloudDbg.value = cdb;
+}
 
 // M10.5: vegetation lighting shares the same sun-direction object as the
 // terrain/atmosphere — trees and ground can never disagree on the light.
@@ -358,7 +364,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9v3-opaquecloud';
+const SIM_VERSION = 'sim v11.9v4-wedgefix';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera

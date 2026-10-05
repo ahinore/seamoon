@@ -252,8 +252,15 @@ export function makePlanetMaterial(): THREE.ShaderMaterial {
           float sunH = dot(normalize(mid), uSunDir);
           inscatter *= smoothstep(-0.15, 0.1, sunH);
           float fog = clamp(1.0 - exp(-min(dR * uBetaR.x + dM * uBetaM.x, 12.0)), 0.0, 1.0);
+          // M11n9v4 EXPOSURE MATCH: the atmosphere shell renders its own
+          // inscatter with a 6x gain + Reinhard shoulder — without the same
+          // curve here the fog target stayed far darker than the sky behind
+          // it, so distant terrain sank into a dark blue-gray band (the
+          // user's wedge flicker: cloud bodies at the coverage edge popped
+          // against it). Fade into the SAME haze the sky shows.
+          vec3 hazeC = inscatter * 6.0 / (1.0 + 2.2 * inscatter);
           // never fully swallow nearby terrain; cap fog at 85%
-          col = mix(col, inscatter * 1.15, min(fog, 0.85));
+          col = mix(col, hazeC, min(fog, 0.85));
         }
         // Wireframe overlay drawn IN the surface shader (front faces only,
         // depth-tested). Two layers:
@@ -527,7 +534,9 @@ export function makeSeaMaterial(shared: {
           float sh2 = dot(normalize(mid), uSunDir);
           inscatter *= smoothstep(-0.15, 0.1, sh2);
           float fog = clamp(1.0 - exp(-min(dR * uBetaR.x + dM * uBetaM.x, 12.0)), 0.0, 1.0);
-          col = mix(col, inscatter * 1.15, min(fog, 0.85));
+          // M11n9v4: same exposure gain as the terrain fog / atmosphere shell
+          vec3 hazeC = inscatter * 6.0 / (1.0 + 2.2 * inscatter);
+          col = mix(col, hazeC, min(fog, 0.85));
         }
         // M10.3: HDR rolloff (glint hotspot) before sRGB conversion.
         col = mix(col, acesToneMap(col), uToneMap);
