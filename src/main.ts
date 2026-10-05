@@ -536,7 +536,13 @@ for (let i = 0; i < speedup; i++) {
 
   if (rig.stickMode) {
     rig.update(dt);
-    flight.step(dt);
+    // M11n9j: fixed-timestep substepping — the flight physics (reentry G,
+    // chute deploy) is dt-sensitive, and heavy cloud views can drop the
+    // frame rate to 20-30 fps, coarsening the integration and spiking the
+    // sampled peakG (54 -> 150 run-to-run). Substep at 16 ms granularity
+    // so the physics is frame-rate independent.
+    const nSteps = Math.max(1, Math.ceil(dt / 0.016));
+    for (let s = 0; s < nSteps; s++) flight.step(dt / nSteps);
     world.abs(rig.camera.position, absCam);
     // M10.9 audio: booster on during the lob boost phase
     updateFlightAudio(audio, flight, flight.boostPhase);

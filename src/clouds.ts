@@ -639,7 +639,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float body = smoothstep(0.44, 0.56, bodyN);
           float towerN = noise3(spF * (1.0 / 9000.0) + wind * (1.0 / 9000.0));
           float tower = smoothstep(0.55, 0.72, towerN);
-          d *= region * mix(0.55, 1.0, body) * max(1.0, tower * 1.2);
+          // M11n9i: from INSIDE the cloud zone (camAlt < 12 km) the shell
+          // sits at the TOWER TOPS — it must paint only the tower/anvil
+          // footprint there, not the whole deck: the deck is BELOW the
+          // camera, and painting its map at 12 km hung a blocky cloud
+          // sheet in the sky above the horizon (user report). Above 12 km
+          // (the orbit view) the full map is correct.
+          float towerAnvilS = smoothstep(0.40, 0.55, towerN);
+          d *= region * mix(0.55, 1.0, body) * max(1.0, tower * 1.2)
+             * mix(1.0, towerAnvilS, smoothstep(6000.0, 12000.0, camAlt));
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // M11n9e: sunset tint on the far map (matches the march's tint)
           vec3 shellTint = mix(vec3(1.0, 0.48, 0.25), vec3(1.0),
