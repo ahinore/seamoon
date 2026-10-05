@@ -683,17 +683,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float body = smoothstep(0.55, 0.66, bodyN);
           float towerN = noise3(spF * (1.0 / 9000.0) + wind * (1.0 / 9000.0));
           float tower = smoothstep(0.60, 0.75, towerN);
-          // M11n9m: the shell paints the HORIZON BAND when inside the zone
-          // (ray elevation < ~3 deg) — the distant regions' tower tops as a
-          // thin fog-washed band right at the horizon. The mid-sky stays
-          // clear (the march's 3D towers own it; the 2D map seen edge-on
-          // there read as torn paper wisps — user report, three times).
-          // Above 12 km (the orbit view) the full map applies.
-          float elevR = asin(clamp(dot(rd, normalize(ro)), -1.0, 1.0));
-          float inZone = 1.0 - smoothstep(11000.0, 13000.0, camAlt);
-          float horizonGate = max(smoothstep(11000.0, 13000.0, camAlt),
-                                  inZone * (1.0 - smoothstep(0.030, 0.055, elevR)));
-          d *= region * mix(0.55, 1.0, body) * max(1.0, tower * 1.2) * horizonGate;
+          // M11n9n: the shell paints NOTHING below 12 km camera altitude —
+          // final. The march fills the whole in-zone view including the
+          // horizon band (measured 100% white with the march alone); the
+          // shell's 2D map added a second, different pattern on top of
+          // the march's clouds (user report: "near clouds missing at the
+          // horizon, far clouds drawn instead" — the shell overwrote the
+          // march's band with its own map). Above 12 km the full map
+          // applies.
+          d *= smoothstep(11000.0, 13000.0, camAlt);
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // M11n9e: sunset tint on the far map (matches the march's tint)
           vec3 shellTint = mix(vec3(1.0, 0.48, 0.25), vec3(1.0),
