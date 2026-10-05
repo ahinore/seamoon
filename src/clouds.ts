@@ -696,6 +696,19 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float overlap = mix(0.45, 1.0, smoothstep(4000.0, 12000.0, camAlt));
           float zoneBand = (1.0 - smoothstep(11000.0, 13000.0, camAlt)) * bandGate * overlap;
           d *= max(smoothstep(11000.0, 13000.0, camAlt), zoneBand);
+          // M11n9q HORIZON WALL: the strip between the deck's visual edge
+          // (~244 km from 8.9 km) and the true horizon (~340 km) shows the
+          // distant clouds' VERTICAL SIDES — from afar you see cloud walls,
+          // not the top-down coverage, so the strip read as empty blue even
+          // where regions existed (user report: altitude-dependent). Add a
+          // relaxed-coverage wall density in the band (region/body
+          // thresholds lowered): the strip reads as a fog-washed distant
+          // cloud bank at every altitude. zoneBand keeps it out of the
+          // mid-sky (the wisp killer) and above the handoff.
+          float wallRegion = smoothstep(0.38, 0.50, regionN);
+          float wallBody = smoothstep(0.46, 0.58, bodyN);
+          float wall = wallRegion * mix(0.55, 1.0, wallBody);
+          d = max(d, wall * zoneBand);
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // M11n9e: sunset tint on the far map (matches the march's tint)
           vec3 shellTint = mix(vec3(1.0, 0.48, 0.25), vec3(1.0),
