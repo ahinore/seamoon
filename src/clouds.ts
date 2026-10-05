@@ -36,6 +36,11 @@ export interface CloudUniforms {
   uTanHalfFov: { value: number }; // screen-space LOD: km per pixel
   uViewportH: { value: number };
   uCloudDbg: { value: number }; // 1 = color-code deck suppression sources
+  // M11n9k: aerial perspective for the shell (shared with the atmosphere)
+  uBetaR: { value: THREE.Vector3 };
+  uBetaM: { value: THREE.Vector3 };
+  uHR: { value: number };
+  uHM: { value: number };
 }
 
 /**
@@ -116,6 +121,13 @@ export function makeCloudUniforms(planetR: number): CloudUniforms {
     uTime: { value: 0 },
     uCover: { value: 0.42 },
     uVolSteps: { value: 18 },
+    // M11n9k: aerial perspective for the shell — the betas/scale heights are
+    // SHARED with the atmosphere/terrain so the distant clouds wash into the
+    // horizon haze exactly like the terrain does
+    uBetaR: { value: new THREE.Vector3(5.8e-6, 13.5e-6, 33.1e-6) },
+    uBetaM: { value: new THREE.Vector3(4e-6, 4e-6, 4e-6) },
+    uHR: { value: 8500 },
+    uHM: { value: 1200 },
     uTanHalfFov: { value: Math.tan((60 * Math.PI) / 360) },
     uViewportH: { value: 900 },
     uCloudDbg: { value: 0 },
@@ -165,6 +177,10 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
       uniform float uViewportH;
       uniform float uCloudDbg;
       uniform float uNearHull;
+      uniform vec3 uBetaR;
+      uniform vec3 uBetaM;
+      uniform float uHR;
+      uniform float uHM;
       varying vec3 vWorld;
 
       // Float32-safe hash (IQ): fract() FIRST bounds every intermediate,
@@ -686,6 +702,35 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float sunHs = dot(up0, uSunDir);
           shellCol *= smoothstep(-0.12, 0.08, sunHs);
           shellA *= smoothstep(-0.25, 0.0, sunHs) * 0.98 + 0.02;
+          // M11n9k AERIAL PERSPECTIVE: distant shell clouds wash into the
+          // horizon haze. Edge-on from inside the zone the 2D map read as
+          // paper-thin wisps floating in the sky (user report) — with the
+          // same fog the terrain uses (optical depth over the view
+          // distance, 2-sample sun od) the far band fades into the haze
+          // instead. Cloud uniforms share the atmosphere's betas.
+          {
+            float distS = distance(uCamPos, vWorld);
+            vec3 midS = ro + rd * (distS * 0.5);
+            float hgtS = max(length(midS) - uPlanetR, 0.0);
+            float dRS = exp(-hgtS / uHR) * distS;
+            float dMS = exp(-hgtS / uHM) * distS;
+            float sunHs3 = dot(normalize(midS), uSunDir);
+            // inscatter toward the camera (2-sample sun od, same as terrain)
+            vec3 p1S = midS + uSunDir * (uHR * 2.0);
+            float h1S = max(length(p1S) - uPlanetR, 0.0);
+            float sLenS = distance(midS, p1S);
+            float sdRS = (exp(-hgtS / uHR) + exp(-h1S / uHR)) * 0.5 * sLenS;
+            float sdMS = (exp(-hgtS / uHM) + exp(-h1S / uHM)) * 0.5 * sLenS;
+            vec3 odSunS = vec3(sdRS * uBetaR.x, sdRS * uBetaR.y, sdRS * uBetaR.z) + sdMS * uBetaM;
+            float muS = dot(rd, uSunDir);
+            float phRS = 3.0 / (16.0 * 3.14159) * (1.0 + muS * muS);
+            float gS = 0.76;
+            float phMS = 3.0 / (8.0 * 3.14159) * ((1.0 - gS*gS)*(1.0+muS*muS)) / ((2.0+gS*gS)*pow(1.0+gS*gS-2.0*gS*muS, 1.5));
+            vec3 inscS = (vec3(dRS * uBetaR.x, dRS * uBetaR.y, dRS * uBetaR.z) * phRS + dMS * uBetaM * phMS)
+                       * exp(-odSunS) * smoothstep(-0.15, 0.1, sunHs3);
+            float fogS = clamp(1.0 - exp(-min(dRS * uBetaR.x + dMS * uBetaM.x, 12.0)), 0.0, 1.0);
+            shellCol = mix(shellCol, inscS * 1.15, min(fogS, 0.85));
+          }
           }
         }
 
