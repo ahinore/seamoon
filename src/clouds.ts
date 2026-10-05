@@ -1034,6 +1034,30 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                 // see-through from below (dark sky bled through, cloud
                 // pixels read luma ~100) and pale at the LOD handoff.
                 volCol += lit * aStep * volT;
+                // M11n9s LIGHTNING: storm towers flash from inside. The
+                // tower lattice cell (9 km, wind-attached) hashes to a
+                // random period/phase; the flash is a short double-flicker
+                // (two pulses ~90 ms apart, ~0.25 s total — real strokes
+                // restrike). Emissive: bypasses the sun's shadow term (a
+                // storm interior is self-lit) and tints blue-white, gated
+                // to the tower body (hE 0.3-4.5) — the flash only computes
+                // its tower noise during a flash window (rare), so the
+                // steady-state march cost is one hash.
+                vec3 tc = floor(p / 9000.0 + wind / 9000.0);
+                float periodL = mix(2.5, 9.0, fract(sin(dot(tc, vec3(127.1, 311.7, 74.7))) * 43758.5453));
+                float phaseL = fract(sin(dot(tc, vec3(269.5, 183.3, 246.1))) * 43758.5453);
+                float ftL = fract(uTime / periodL + phaseL);
+                float f1L = exp(-pow((ftL - 0.02) / 0.012, 2.0));
+                float f2L = 0.6 * exp(-pow((ftL - 0.085) / 0.010, 2.0));
+                float flashI = clamp(f1L + f2L, 0.0, 1.0);
+                if (flashI > 0.001) {
+                  float tN = noise3(p * (1.0 / 9000.0) + wind * (1.0 / 9000.0));
+                  if (tN > 0.70) {
+                    float hEl = cloudHeightE(p);
+                    float vProf = smoothstep(0.3, 1.0, hEl) * (1.0 - smoothstep(3.4, 4.5, hEl));
+                    volCol += vec3(0.85, 0.92, 1.0) * flashI * vProf * aStep * volT * 3.0;
+                  }
+                }
                 volT *= 1.0 - aStep;
                 if (volT < 0.03) break;
               }
