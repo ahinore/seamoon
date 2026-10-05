@@ -438,6 +438,16 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         float towerAnvil = smoothstep(0.78, 0.92, towerN);
         float towerMask = mix(tower, towerAnvil, smoothstep(2.0, 3.0, hE));
         float vert = max(vertBase, vertTower * towerMask);
+        // M11n9v RAIN SHAFTS: precipitation curtains hang below the
+        // strongest towers — narrower than the tower (0.78-0.88 on the same
+        // 9 km lattice, no new noise), from just under the cloud base down
+        // to hE -0.65 (~240 m AGL), fading at both ends. Scaled 0.45 so the
+        // curtain stays translucent gray-blue (the ambient shading handles
+        // the darkness — rain samples sit below the base where the
+        // height-ambient term is 0).
+        float rainN = smoothstep(0.78, 0.88, towerN);
+        float vertRain = (1.0 - smoothstep(-0.65, -0.20, hE)) * smoothstep(0.05, -0.05, hE);
+        vert = max(vert, vertRain * rainN * 0.45);
         d *= region * mix(0.55, 1.0, body) * vert;
         return d;
       }
@@ -837,12 +847,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // M11n9: the cloud zone now extends to the TOWER tops (~12 km) —
           // cumulonimbus towers rise from the 1.8 km base through the old
           // 4.2 km deck top
-          float rB = uPlanetR + ${CLOUD_BOTTOM.toFixed(1)};
+          float rB = uPlanetR + 300.0; // M11n9v: extended down from the 1800 m base for rain shafts
           float rT = uPlanetR + 12000.0;
           vec2 tB = raySphere(ro, rd, rB);
           vec2 tT = raySphere(ro, rd, rT);
           float t0, t1;
-          if (camAlt < ${CLOUD_BOTTOM.toFixed(1)}) {
+          if (camAlt < 300.0) {
             // below the base: enter at bottom-sphere far hit, exit at top far hit.
             // HORIZON REJECTION: the near hull has depthTest off (mountains
             // must not erase the deck), so downward rays whose sight line
@@ -883,7 +893,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             // the (rare) upward case; up rays exit at the top far hit.
             t1 = dot(rd, up0) > 0.0 ? tT.y : max(tB.y, 0.0);
           }
-          if (tB.x < 0.0 && tB.y < 0.0 && camAlt < ${CLOUD_BOTTOM.toFixed(1)}) {
+          if (tB.x < 0.0 && tB.y < 0.0 && camAlt < 300.0) {
             t1 = -1.0; // grazing ray that never re-enters: no march
           }
           if (t1 > t0) {
