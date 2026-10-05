@@ -792,6 +792,24 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             float fogS = clamp(1.0 - exp(-min(dRS * uBetaR.x + dMS * uBetaM.x, 12.0)), 0.0, 1.0);
             shellCol = mix(shellCol, inscS * 1.15, min(fogS, 0.85));
           }
+          // M11n9s DISTANT LIGHTNING: the shell's tower band flashes too —
+          // far storms on the horizon pulse blue-white (unmistakable at
+          // night, a faint white pulse by day). Added AFTER the fog mix
+          // because the night fog washes shellCol toward 0 (inscS is dark
+          // at night) and would erase the flash. Same cell-hash timing
+          // scheme as the march's flashes. The alpha lifts for the flash
+          // duration: the night fade leaves shellA at its 0.02 floor, and
+          // a flash with no alpha is invisible.
+          vec3 tcS = floor(spF / 9000.0 + wind / 9000.0);
+          float periodS = mix(2.5, 9.0, fract(sin(dot(tcS, vec3(127.1, 311.7, 74.7))) * 43758.5453));
+          float phaseS = fract(sin(dot(tcS, vec3(269.5, 183.3, 246.1))) * 43758.5453);
+          float ftS = fract(uTime / periodS + phaseS);
+          float flashS = clamp(exp(-pow((ftS - 0.02) / 0.012, 2.0))
+                     + 0.6 * exp(-pow((ftS - 0.085) / 0.010, 2.0)), 0.0, 1.0);
+          if (flashS > 0.001 && towerN > 0.72) {
+            shellCol += vec3(0.85, 0.92, 1.0) * flashS * tower * 2.5;
+            shellA = max(shellA, flashS * tower * 0.85 * max(wShell, zoneBand));
+          }
           }
         }
 
