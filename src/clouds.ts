@@ -253,10 +253,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // the lattice: rescaling planet-frame coordinates per pixel jumps the
         // noise grid by whole cells -> concentric ripple rings. Amplitude
         // fade is continuous in the fade value, so it cannot ring.
+        // M11n9t3 PERF: below detail 0.25 the 3rd octave's amplitude is
+        // < 6% of the first — skip its noise eval entirely (the density
+        // chain calls this per march step; far samples all qualify).
         float a = 0.5, s = 0.0;
         s += a * noise3(p); p *= 2.17; a *= 0.5;
         s += a * noise3(p); p *= 2.17; a *= 0.5 * detail;
-        s += a * noise3(p);
+        if (a > 0.0125) s += a * noise3(p);
         return s;
       }
       // Shell-specific: THREE WORLD-ANCHORED octave cells (70/32.2/14.8 km),
