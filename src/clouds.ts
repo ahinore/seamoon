@@ -396,10 +396,20 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         d *= gate;
         float regionN = noise3(p * (1.0 / 60000.0) + windOff * (1.0 / 60000.0));
         float region = smoothstep(0.50, 0.60, regionN);
+        // M11n9l: the body duty dropped to ~12% (threshold raised again) —
+        // the Ace-Combat look needs DISCRETE bodies with blue gaps even on
+        // horizontal views at the tower-band altitude: a 32 km horizontal
+        // ray crosses ~8 body cells, and any duty > 20% saturates the whole
+        // horizon into a white sheet (measured 90% cover at 8.7 km)
         float bodyN = noise3(p * (1.0 / 4000.0) + windOff * (1.0 / 4000.0));
-        float body = smoothstep(0.44, 0.56, bodyN);
+        float body = smoothstep(0.55, 0.66, bodyN);
         float towerN = noise3(p * (1.0 / 9000.0) + windOff * (1.0 / 9000.0));
-        float tower = smoothstep(0.55, 0.72, towerN);
+        // M11n9l: towers are RARE GIANTS (~2% of 9 km cells) — a horizontal
+        // ray at the tower-band altitude crosses ~19 cells, and any duty
+        // above ~5% saturates the whole sky into white (measured 64% cover
+        // at 8.7 km even with the tower at 10%). Rare towers keep the
+        // Ace-Combat look: blue sky with a few massive storm columns.
+        float tower = smoothstep(0.72, 0.88, towerN);
         // vertical profile in slab units: hE 0 = 1.8 km base, 1 = 4.2 km
         // (the old deck top), 4.3 = ~12 km (tower top).
         // M11n9b: the base deck fades 0.70-2.2 (up to ~7 km) instead of
@@ -414,8 +424,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // M11n9f ANVIL: real cumulonimbus spread out at the top — above
         // hE 2 (~6.6 km) the tower mask widens (lower threshold on the
         // same 9 km lattice) so towers flare outward into anvil caps
-        // instead of ending as vertical columns
-        float towerAnvil = smoothstep(0.40, 0.55, towerN);
+        // instead of ending as vertical columns.
+        // M11n9l fix: the anvil threshold kept ~40% of the sky covered at
+        // the camera's own altitude band (hE 2.5-3.5 = 8-10 km) — flying
+        // there the whole sky filled with flat anvil sheet (user report).
+        // Narrower anvil mask (0.48-0.60 → ~20% sky) keeps open blue
+        // between the caps.
+        // M11n9l fix: the anvil mask is RARER than the tower (0.78-0.92 vs
+        // 0.72-0.88) — only the greatest towers get caps.
+        float towerAnvil = smoothstep(0.78, 0.92, towerN);
         float towerMask = mix(tower, towerAnvil, smoothstep(2.0, 3.0, hE));
         float vert = max(vertBase, vertTower * towerMask);
         d *= region * mix(0.55, 1.0, body) * vert;
@@ -662,18 +679,20 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float regionN = noise3(spF * (1.0 / 60000.0) + wind * (1.0 / 60000.0));
           float region = smoothstep(0.50, 0.60, regionN);
           float bodyN = noise3(spF * (1.0 / 4000.0) + wind * (1.0 / 4000.0));
-          float body = smoothstep(0.44, 0.56, bodyN);
+          // M11n9l: the body duty matches cloudDensity's raised threshold
+          float body = smoothstep(0.55, 0.66, bodyN);
           float towerN = noise3(spF * (1.0 / 9000.0) + wind * (1.0 / 9000.0));
-          float tower = smoothstep(0.55, 0.72, towerN);
-          // M11n9i: from INSIDE the cloud zone (camAlt < 12 km) the shell
-          // sits at the TOWER TOPS — it must paint only the tower/anvil
-          // footprint there, not the whole deck: the deck is BELOW the
-          // camera, and painting its map at 12 km hung a blocky cloud
-          // sheet in the sky above the horizon (user report). Above 12 km
-          // (the orbit view) the full map is correct.
-          float towerAnvilS = smoothstep(0.40, 0.55, towerN);
-          d *= region * mix(0.55, 1.0, body) * max(1.0, tower * 1.2)
-             * mix(1.0, towerAnvilS, smoothstep(6000.0, 12000.0, camAlt));
+          float tower = smoothstep(0.60, 0.75, towerN);
+          // M11n9l: from inside the zone (camAlt < 12 km) the shell paints
+          // NOTHING — the 2D map seen edge-on read as torn paper wisps
+          // floating in the sky (user report, three times: it survives the
+          // anvil gating and the distance fog because the fog at 8-11 km
+          // altitude is weak). The march's 3D towers own the whole in-zone
+          // view; the horizon band beyond its cap stays clear sky (matches
+          // the sparse-region look). Above 12 km (the orbit view) the full
+          // map applies.
+          float horizonGate = smoothstep(11000.0, 13000.0, camAlt);
+          d *= region * mix(0.55, 1.0, body) * max(1.0, tower * 1.2) * horizonGate;
           float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
           // M11n9e: sunset tint on the far map (matches the march's tint)
           vec3 shellTint = mix(vec3(1.0, 0.48, 0.25), vec3(1.0),
@@ -706,7 +725,9 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // d 0.2-0.5 regions were 30-80% see-through, compositing the dark
           // ground into a warm-gray dot).
           shellA = 1.0 - exp(-d * 12.0);
-          shellAraw = shellA;
+          // M11n9l: shellAraw is 0 when the gate zeroes d (in-zone) — the
+          // far-band fill must not paint a gray veil from an empty map
+          shellAraw = (1.0 - exp(-d * 12.0)) * step(0.0001, d);
           shellA *= wShell;
           // night fade (same terms as the volumetric path)
           float sunHs = dot(up0, uSunDir);
@@ -814,12 +835,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             // clear region/body the horizon band rendered as a cloudless
             // strip (user report). Horizontal rays march 40 km (crossing
             // several 60 km-scale regions' edges), steep rays keep 18 km.
-            const int MAX_STEPS = 28;
-            t1 = min(t1, t0 + mix(24000.0, 18000.0,
+            const int MAX_STEPS = 32;
+            t1 = min(t1, t0 + mix(32000.0, 18000.0,
                                   clamp(abs(dot(rd, up0)) * 10.0, 0.0, 1.0)));
             // step count scales with the marched span so the sample
             // density stays ~1 km/step in every direction
-            int steps = int(clamp(uVolSteps * (t1 - t0) / 18000.0, 12.0, 28.0));
+            int steps = int(clamp(uVolSteps * (t1 - t0) / 18000.0, 12.0, 32.0));
             dbgT0 = t0; dbgSpan = (t1 - t0) / 18000.0; dbgSteps = float(steps) / 48.0;
             // cap the marched path: grazing rays through the slab would
             // accumulate alpha=1 over hundreds of km and read as a gray
