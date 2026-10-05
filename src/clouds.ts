@@ -765,6 +765,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // d 0.2-0.5 regions were 30-80% see-through, compositing the dark
           // ground into a warm-gray dot).
           shellA = 1.0 - exp(-d * 12.0);
+          // M11n9v3 TERRAIN-REVEAL FIX: at shell densities d 0.2-0.4 the
+          // old curve left alpha 92-99% — the remaining 1-8% leaked the
+          // terrain below (sea-tile edges, coastlines) through the deck as
+          // faint rectangle-shaped streaks that shimmered against the deck
+          // whenever the camera moved (the user's flicker report starting
+          // ~60 km). Cloud with real density must be opaque: floor the
+          // alpha at 98% once d passes ~0.15. Only true wisp fringes
+          // (d < 0.15) stay translucent.
+          shellA = max(shellA, smoothstep(0.05, 0.15, d) * 0.98);
           // M11n9p HULL-PROXIMITY FADE: the far hull is a 2D surface —
           // as the camera approaches its 12 km radius the polygon edges
           // and the flat sheet become visible (user screenshot at 10.2 km,
@@ -831,8 +840,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float flashS = clamp(exp(-pow((ftS - 0.02) / 0.012, 2.0))
                      + 0.6 * exp(-pow((ftS - 0.085) / 0.010, 2.0)), 0.0, 1.0);
           if (flashS > 0.001 && towerN > 0.72) {
-            shellCol += vec3(0.85, 0.92, 1.0) * flashS * tower * 2.5;
-            shellA = max(shellA, flashS * tower * 0.85 * max(wShell, zoneBand));
+            // M11n9v2 SLIVER FIX: gate the flash by the deck's own drawn
+            // density. The old alpha lift (flashS * tower * 0.85) painted
+            // bright fragments wherever the tower noise exceeded 0.72 —
+            // INCLUDING holes in the body/region coverage — so every flash
+            // spawned white cloud-shaped slivers floating over clear sky,
+            // popping at different spots each frame (the user's flicker
+            // report at 45-102 km). Gating by d keeps each flash INSIDE
+            // the cloud silhouette it belongs to.
+            float fl = flashS * tower * smoothstep(0.30, 0.65, d);
+            shellCol += vec3(0.85, 0.92, 1.0) * fl * 2.5;
+            shellA = max(shellA, fl * 0.85 * max(wShell, zoneBand));
           }
           } // M11n9t2 early-out if
           }
