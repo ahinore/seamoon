@@ -37,13 +37,14 @@ const urlParams = new URLSearchParams(location.search);
 const renderer = new THREE.WebGLRenderer({
   // MSAA switchable from URL for A/B diagnosis (?aa=0).
   antialias: urlParams.get('aa') !== '0',
-  // Reversed-Z depth is OPT-IN for now (?revz=1): three.js 0.170's
+  // Reversed-Z depth is the DEFAULT (M11w): the three.js 0.170
   // reverseDepthBuffer path has a bug (WebGLState.setReversed tests the OLD
-  // `reversed` value, so it sets NEGATIVE_ONE_TO_ONE instead of ZERO_TO_ONE
-  // and skips the clear-depth flip), which black-screens every fragment.
-  // Our app-side workaround is not yet sufficient; forward 24-bit depth with
-  // the altitude-adaptive near plane stays the default until verified.
-  reverseDepthBuffer: urlParams.get('revz') === '1',
+  // `reversed` value, so enabling it leaves NEGATIVE_ONE_TO_ONE clip control
+  // and skips the clear-depth flip), but the app-side workaround below now
+  // fully corrects both — A/B across the 7 smoke views matches forward-Z
+  // pixel-stat for pixel-stat. ?revz=0 falls back to forward 24-bit depth
+  // with the altitude-adaptive near plane for diagnosis.
+  reverseDepthBuffer: urlParams.get('revz') !== '0',
 });
 // M10.9 procedural flight audio (?audio=0 disables; starts on first gesture)
 const audio = new FlightAudio(urlParams.get('audio') !== '0');
@@ -62,7 +63,8 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 document.body.appendChild(renderer.domElement);
 
-// WORKAROUND for a three.js 0.170 bug (WebGLState.setReversed):
+// WORKAROUND for a three.js 0.170 bug (WebGLState.setReversed) — now the
+// reason reversed-Z can be the DEFAULT:
 // the clip-control branch tests the OLD `reversed` value, so enabling
 // reversed depth sets NEGATIVE_ONE_TO_ONE instead of ZERO_TO_ONE, and the
 // clear-depth flip (1 -> 0) is skipped on the first setClear. Every
@@ -75,14 +77,21 @@ if ((renderer as unknown as { capabilities: { reverseDepthBuffer: boolean } }).c
   const clip = glc.getExtension('EXT_clip_control');
   if (clip) {
     clip.clipControlEXT(clip.LOWER_LEFT, clip.ZERO_TO_ONE);
-    glc.clearDepth(0);
-    glc.clear(glc.DEPTH_BUFFER_BIT);
-    // keep three's internal tracker from re-clearing with 1 later
+    // three's setReversed(true) fails to update the clear depth when its
+    // tracker is still null (oldDepth === null -> setClear no-ops), so GL
+    // clearDepth stays at the default 1 — which in reversed depth is the
+    // NEAR plane, and the GREATER test then rejects every fragment.
+    // setClear takes USER-space depth (default 1) and maps it itself
+    // (1 - 1 = 0): this fixes both the GL state and the tracker in one
+    // call. The previous workaround called setClear(0), which mapped to
+    // gl.clearDepth(1) and re-broke every frame's clear (black frame).
     (
       renderer as unknown as {
         state: { buffers: { depth: { setClear: (d: number) => void } } };
       }
-    ).state.buffers.depth.setClear(0);
+    ).state.buffers.depth.setClear(1);
+    glc.clearDepth(0);
+    glc.clear(glc.DEPTH_BUFFER_BIT);
   } else {
     errors.push('EXT_clip_control missing — reversed-Z unavailable');
   }
@@ -364,7 +373,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9v4-wedgefix';
+const SIM_VERSION = 'sim v11.9w2-revz';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -655,8 +664,12 @@ for (let i = 0; i < speedup; i++) {
   // overwrite it or the transfer misses the moon by the drift.
   if (auto.moonAngle !== null) {
     moonPositionAtAngle(auto.moonAngle, MOON.center);
-  } else if (flight.moonshotActive) {
-    // keep MOON.center = flight.moonC (the demo's frozen placement)
+  } else if (flight.moonshotActive || flight.returnMission) {
+    // M11j/M11w: the moonshot AND the return mission own the moon's
+    // placement (the flight model freezes it at spawn — return uses the
+    // anti-solar phase so the splashdown antipode is in daylight); the
+    // live clock must not overwrite it or the parked craft drifts off
+    // the rendered moon.
     MOON.center.copy(flight.moonCenter);
   } else {
     moonPosition(performance.now() / 1000 - t0Sim, MOON.center);

@@ -322,6 +322,20 @@ export class FlightModel {
       // approach matters.
       this.tliRa = MOON_ORBIT_R;
       this.moonC.copy(moonCenterFromParams(q, performance.now() / 1000));
+      // M11w: the return mission owns the moon's phase too. With the default
+      // live-clock placement (+X, the day side) the TEI hands the craft a
+      // tangential retrograde velocity, so the return ellipse's 25 km
+      // perigee — the splashdown point — sits at the moon's ANTIPODE, and
+      // every return mission splashed down on the night side (in-plane
+      // perigee rotation is unaffordable: 10 deg costs ~830 m/s at this
+      // ra/rp ratio, 15 deg goes hyperbolic). Park the moon on the
+      // anti-solar side instead: its antipode then enjoys a ~38 deg sun
+      // elevation at splashdown, and the entry crosses the terminator into
+      // daylight (same trick as the moonshot's Math.PI placement below).
+      // ?moonangle= keeps its test-hook meaning and overrides this.
+      if (this.returnMission && !q.has('moonangle')) {
+        moonPositionAtAngle(235 * DEG, this.moonC);
+      }
       MOON.center.copy(this.moonC);
       this.primC.set(0, 0, 0);
       this.primMu = MU;
