@@ -287,6 +287,112 @@ moonView.root.add(moonFallback);
 const t0Sim = performance.now() / 1000;
 
 const hud = new Hud('hud');
+
+// M11w5 NAV RADAR: in space there is no horizon or up reference and the
+// user loses track of where Earth and Moon are. A small camera-relative
+// radar (ship at center): azimuth = angle around the ring (radar up =
+// the camera's forward), radial = linear sky-sphere projection (center =
+// zenith, mid ring = the horizon plane, rim = nadir). A north tick
+// (Earth's +Y polar axis) gives heading reference. Fades in above
+// 40 km altitude; ?radar=0 disables.
+const radarCanvas = document.getElementById('radar') as HTMLCanvasElement | null;
+const radarCtx = radarCanvas ? radarCanvas.getContext('2d') : null;
+const radarEnabled = urlParams.get('radar') !== '0';
+let radarAcc = 1; // draw on the first frame
+const _radarQ = new THREE.Quaternion();
+const _radarDir = new THREE.Vector3();
+const _radarEarth = new THREE.Vector3(0, 0, 0); // Earth center, absolute
+
+function drawRadar(dt: number): void {
+  if (!radarCtx || !radarCanvas || !radarEnabled) return;
+  radarAcc += dt;
+  if (radarAcc < 0.1) return; // 10 Hz is plenty for a nav aid
+  radarAcc = 0;
+  const alt = nearBody === 'moon'
+    ? absCam.distanceTo(MOON.center) - R_MOON
+    : absCam.length() - R;
+  const show = alt > 40000;
+  radarCanvas.style.display = show ? 'block' : 'none';
+  if (!show) return;
+  const W = radarCanvas.width, H = radarCanvas.height;
+  const cx = W / 2, cy = H / 2, RR = W / 2 - 16;
+  const ctx = radarCtx;
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(160,200,255,0.35)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, RR, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, RR * 0.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx - RR, cy); ctx.lineTo(cx + RR, cy);
+  ctx.moveTo(cx, cy - RR); ctx.lineTo(cx, cy + RR);
+  ctx.stroke();
+  // camera frame: -Z forward, +Y up — radar up = forward
+  _radarQ.copy(rig.camera.quaternion).invert();
+  // north tick (Earth's polar axis as a direction)
+  _radarDir.set(0, 1, 0).applyQuaternion(_radarQ);
+  if (_radarDir.y > -0.2) {
+    const azN = Math.atan2(_radarDir.x, -_radarDir.z);
+    ctx.fillStyle = 'rgba(160,200,255,0.85)';
+    ctx.font = '9px ui-monospace,Consolas,monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('N', cx + (RR + 7) * Math.sin(azN), cy - (RR + 7) * Math.cos(azN) + 3);
+  }
+  // M11w5 (revised 2): labels live in FIXED slots (top-left = Earth,
+  // bottom-left = Moon) with thin leader lines to the dots. The two
+  // bodies can line up in the same camera direction (e.g. from lunar
+  // orbit with Earth ahead of the nose) and overlapping free-floating
+  // labels were unreadable — the slots keep both readable regardless.
+  const leader = (px: number, py: number, ly: number, color: string) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(30, ly - 3);
+    ctx.stroke();
+  };
+  const plotBody = (centerAbs: THREE.Vector3, surfR: number, dot: string, label: string, labelY: number) => {
+    _radarDir.copy(centerAbs).sub(absCam);
+    const dist = Math.max(_radarDir.length() - surfR, 0);
+    _radarDir.normalize().applyQuaternion(_radarQ);
+    const sinE = THREE.MathUtils.clamp(_radarDir.y, -1, 1);
+    let az = Math.atan2(_radarDir.x, -_radarDir.z);
+    if (sinE < -0.999 || sinE > 0.999) az = 0; // az is unstable at zenith/nadir
+    // M11w5 (revised): linear sky-sphere projection — zenith at the
+    // center, the horizon plane at the mid ring, nadir at the rim. In
+    // orbit BOTH bodies sit below the horizon plane, so a
+    // center=zenith/rim=horizon clamp would pin them jittering on the
+    // rim; the linear map keeps every direction inside the disc with a
+    // stable radius and lets the mid ring read as "the horizon".
+    const rr = (0.08 + (1 - sinE) * 0.42) * RR;
+    const px = cx + rr * Math.sin(az);
+    const py = cy - rr * Math.cos(az);
+    leader(px, py, labelY, dot);
+    ctx.beginPath();
+    ctx.arc(px, py, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#000814'; // dark rim so overlapping dots stay distinct
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.fillStyle = dot;
+    ctx.fill();
+    ctx.fillStyle = dot;
+    ctx.font = '9px ui-monospace,Consolas,monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(label, 6, labelY);
+    ctx.fillText(fmtDist(dist), 6, labelY + 9);
+  };
+  plotBody(_radarEarth, R, '#6fb5ff', 'Earth', 16);
+  plotBody(MOON.center, R_MOON, '#d0d0dc', 'Moon', H - 22);
+  // the craft: a small triangle pointing forward (radar up)
+  ctx.fillStyle = '#ffd27f';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 5);
+  ctx.lineTo(cx - 4, cy + 4);
+  ctx.lineTo(cx + 4, cy + 4);
+  ctx.closePath();
+  ctx.fill();
+}
+
 const absCam = new THREE.Vector3(0, 0, R * 4); // absolute camera position
 let rigRef: CameraRig | null = null;
 // Nearest-body reference (Phase 9 M9.2, registry-driven since M9.6): all
@@ -373,7 +479,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w4-farcloud';
+const SIM_VERSION = 'sim v11.9w5-navradar';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -724,6 +830,7 @@ for (let i = 0; i < speedup; i++) {
 
   renderer.render(scene, rig.camera);
   hud.frame(dt);
+  drawRadar(dt); // M11w5 nav radar (Earth/Moon bearings, 10 Hz)
 
   // Probe access for tools/reentry.mjs: expose the flight model once it
   // exists (declared below this point in module scope).

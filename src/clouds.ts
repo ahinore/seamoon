@@ -497,7 +497,18 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // at 11 km looking at the horizon the old gates left a dead band:
         // the march faded out, the shell hadn't started, and the horizon
         // atmosphere band showed no clouds at all (user report).
-        float wVol = (1.0 - smoothstep(8000.0, 12000.0, camAlt)) * step(0.001, uVolSteps);
+        // M11w5: the fade moved OUT to the hull radius (11.5-12.8 km). The
+        // old 8-12 km fade thinned the deck below while the camera was
+        // still INSIDE the far hull — and the far sheet cannot paint the
+        // deck below the camera from inside (its downlooking fragments are
+        // occluded by the terrain or land beyond the hull horizon), so the
+        // deck went see-through and then blank while climbing 10-13 km
+        // (the user's "entering the far clouds, they suddenly vanish").
+        // The march now owns the deck at full weight until the camera
+        // reaches the hull; the sheet takes over just above it. No perf
+        // change: the march already RAN at these altitudes (the weight
+        // only scaled its result).
+        float wVol = (1.0 - smoothstep(11500.0, 12800.0, camAlt)) * step(0.001, uVolSteps);
 
         // ---------------- weather / coverage ----------------
         vec3 upF = normalize(vWorld - pc);
@@ -606,7 +617,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // camAlt (cheap trig), so they hoist above the block; the inner
           // code reuses them.
           float elevR = asin(clamp(dot(rd, normalize(ro)), -1.0, 1.0));
-          float bandGate = 1.0 - smoothstep(0.035, 0.075, elevR);
+          // M11w5: the band's upper edge lowered from ~2.0-4.3° to
+          // ~0.7-1.7° elevation. The old gate let the far band's cloud
+          // masses tower 2-4° ABOVE the deck line — from 8 km that paints
+          // clouds at 16-24 km altitude, far above the near deck (the
+          // user: "far clouds sit too high, overlap them with the near
+          // clouds"). The band's bottom edge (the terrain horizon) already
+          // meets the near deck's horizon line — only the top needed
+          // pulling down.
+          float bandGate = 1.0 - smoothstep(0.012, 0.030, elevR);
           float overlap = mix(0.45, 1.0, smoothstep(4000.0, 12000.0, camAlt));
           float zoneBand = (1.0 - smoothstep(11000.0, 13000.0, camAlt)) * bandGate * overlap;
           if (wShell > 0.001 || zoneBand > 0.001) {
@@ -795,7 +814,21 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // hull) fade the same way, so the hull is invisible at the
           // moment of crossing.
           float fragDist = distance(uCamPos, vWorld);
-          shellA *= smoothstep(1200.0, 4000.0, fragDist);
+          // M11w5 DIRECTIONAL PROXIMITY FADE: the old all-direction
+          // 1.2-4 km fade also killed the sheet's DOWNLOOKING fragments,
+          // so climbing through 10-13 km the map around/below the camera
+          // vanished on top of the march's own fade (the blank the user
+          // reported). The flat-sheet artifact M11n9p fixed is an
+          // UPLOOKING problem (the sheet as a false ceiling overhead) —
+          // keep the wide fade for fragments above the camera's horizontal
+          // plane, and give downlooking fragments only a narrow
+          // point-blank guard for the instant the camera punches through
+          // the hull. Near-level fragments are always far away (a level
+          // ray needs ~160 km to gain hull-height by curvature), so the
+          // step at the horizontal plane cannot produce a visible seam.
+          float upFrag = step(0.0, dot(rd, normalize(ro)));
+          shellA *= mix(smoothstep(0.0, 300.0, fragDist),
+                        smoothstep(1200.0, 4000.0, fragDist), upFrag);
           // M11n9o: the shell's weight — full above the handoff; in-zone
           // the horizon band's own overlap weight (wShell is 0 there)
           shellA *= max(wShell, zoneBand);
