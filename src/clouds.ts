@@ -733,7 +733,7 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float wallBody = smoothstep(0.46, 0.58, bodyN);
           float wall = wallRegion * mix(0.55, 1.0, wallBody);
           d = max(d, wall * zoneBand);
-          float shellShade = 0.65 + 0.35 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0);
+          float shellShade = 0.72 + 0.28 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0); // M11w4: floor 0.65→0.72 (far deck read darker than the near march)
           // M11n9e: sunset tint on the far map (matches the march's tint)
           vec3 shellTint = mix(vec3(1.0, 0.48, 0.25), vec3(1.0),
                                smoothstep(0.05, 0.45, dot(upF, uSunDir)));
@@ -761,7 +761,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // clipped along its contours, drawing wedge-shaped saturated
           // patches that popped around as the camera moved (the user's
           // "white fragments"). Peak below the knee keeps the shading smooth.
-          shellCol = mix(vec3(0.72, 0.76, 0.82), vec3(0.965, 0.945, 0.915), smoothstep(0.05, 0.6, d)) * shellShade * shellTint;
+          // M11w4 COLOR MATCH: the far map's low-d edge read cool gray-blue
+          // (0.72,0.76,0.82) and most of the deck sat in the gray half of
+          // the mix — visibly darker than the march's tonemapped white
+          // (user: "far clouds too dark vs near"). The march renders
+          // 242-255 after tonemap, so the far edges now land ~238-254:
+          // nearly white with a hint of neutral gray for shape.
+          shellCol = mix(vec3(0.84, 0.85, 0.87), vec3(0.98, 0.97, 0.95), smoothstep(0.04, 0.5, d)) * shellShade * shellTint;
           // Opacity calibrated to the volumetric march it replaces: marching
           // the full ~2.4 km slab accumulates ~1-exp(-d * 6). The old k=2600
           // saturated EVERY pixel to opaque (uniform cream sheet from orbit).
@@ -845,33 +851,12 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             float fogS = clamp(1.0 - exp(-min(dRS * uBetaR.x + dMS * uBetaM.x, 12.0)), 0.0, 1.0);
             shellCol = mix(shellCol, hazeS, min(fogS, 0.85));
           }
-          // M11n9s DISTANT LIGHTNING: the shell's tower band flashes too —
-          // far storms on the horizon pulse blue-white (unmistakable at
-          // night, a faint white pulse by day). Added AFTER the fog mix
-          // because the night fog washes shellCol toward 0 (inscS is dark
-          // at night) and would erase the flash. Same cell-hash timing
-          // scheme as the march's flashes. The alpha lifts for the flash
-          // duration: the night fade leaves shellA at its 0.02 floor, and
-          // a flash with no alpha is invisible.
-          vec3 tcS = floor(spF / 9000.0 + wind / 9000.0);
-          float periodS = mix(2.5, 9.0, fract(sin(dot(tcS, vec3(127.1, 311.7, 74.7))) * 43758.5453));
-          float phaseS = fract(sin(dot(tcS, vec3(269.5, 183.3, 246.1))) * 43758.5453);
-          float ftS = fract(uTime / periodS + phaseS);
-          float flashS = clamp(exp(-pow((ftS - 0.02) / 0.012, 2.0))
-                     + 0.6 * exp(-pow((ftS - 0.085) / 0.010, 2.0)), 0.0, 1.0);
-          if (flashS > 0.001 && towerN > 0.72) {
-            // M11n9v2 SLIVER FIX: gate the flash by the deck's own drawn
-            // density. The old alpha lift (flashS * tower * 0.85) painted
-            // bright fragments wherever the tower noise exceeded 0.72 —
-            // INCLUDING holes in the body/region coverage — so every flash
-            // spawned white cloud-shaped slivers floating over clear sky,
-            // popping at different spots each frame (the user's flicker
-            // report at 45-102 km). Gating by d keeps each flash INSIDE
-            // the cloud silhouette it belongs to.
-            float fl = flashS * tower * smoothstep(0.30, 0.65, d);
-            shellCol += vec3(0.85, 0.92, 1.0) * fl * 2.5;
-            shellA = max(shellA, fl * 0.85 * max(wShell, zoneBand));
-          }
+          // M11w4: the far-shell DISTANT LIGHTNING (M11n9s) is REMOVED —
+          // the user reported the far deck flickering white and found it
+          // unnatural. The flash lifted shellA, so whole far-map cells
+          // popped in/out every few seconds ("white flicker"), not just a
+          // glow. Close storms still flash via the march's own flash term
+          // (near hull only).
           } // M11n9t2 early-out if
           }
         }
