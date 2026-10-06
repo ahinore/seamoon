@@ -179,6 +179,16 @@ export function makeAtmosphereMesh(planetR: number, uniforms: AtmosphereUniforms
   });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.frustumCulled = false;
-  mesh.renderOrder = 5; // after terrain
+  // M11w3: 3 = before the cloud hulls (far 4, near 5). The old 5 ("after
+  // terrain") was unnecessary — terrain is OPAQUE and always draws in the
+  // opaque pass before every transparent object — and harmful: among
+  // transparent objects the atmosphere sorted AFTER the far hull, so its
+  // nearly-opaque horizon glow composited OVER the far hull's horizon-band
+  // clouds. Measured at 6 km level: the far hull contributed 0/156000 band
+  // pixels with the atmosphere on vs 77905/156000 with ?atmo=0 — the
+  // user's "near clouds are missing near the horizon; the horizon
+  // brightness paints over them". Sun/moon discs (-5/-3) and stars stay
+  // behind the shell (physically correct — the air is in front of them).
+  mesh.renderOrder = 3;
   return mesh;
 }
