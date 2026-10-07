@@ -855,9 +855,18 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           float wall = wallRegion * mix(0.55, 1.0, wallBody);
           d = max(d, wall * zoneBand);
           float shellShade = 0.72 + 0.28 * clamp(dot(upF, uSunDir) * 0.5 + 0.5, 0.0, 1.0); // M11w4: floor 0.65→0.72 (far deck read darker than the near march)
-          // M11n9e: sunset tint on the far map (matches the march's tint)
-          vec3 shellTint = mix(vec3(1.0, 0.48, 0.25), vec3(1.0),
-                               smoothstep(0.05, 0.45, dot(upF, uSunDir)));
+          // M11w9: sunset-lit clouds also DIM. Real terminator-crossing
+          // decks read well below noon brightness — the old shade kept them
+          // at 0.86, so the orange band outglowed the dayside ocean from
+          // orbit (user: "宇宙から見てもオレンジになるのですか?").
+          shellShade *= mix(0.55, 1.0, smoothstep(-0.05, 0.28, dot(upF, uSunDir)));
+          // M11n9e: sunset tint on the far map (matches the march's tint).
+          // M11w9: transition narrowed 0.05-0.45 -> 0.02-0.18 — the old
+          // window kept the deck orange out to 26° sun elevation, painting
+          // a ~2500 km saturated salmon band across the terminator. Real
+          // sunset glow on clouds fades out by ~10°.
+          vec3 shellTint = mix(vec3(1.0, 0.50, 0.28), vec3(1.0),
+                               smoothstep(0.02, 0.18, dot(upF, uSunDir)));
           // ---- DEBUG (?cloudbg=1): color-code what suppresses the deck --
           // RED   = sys below threshold (fbm/anchor dips: lattice holes)
           // GREEN = gate low (macro weather suppressing: system gaps)
@@ -1268,13 +1277,18 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                 // M11n9e: sunset tint — near the terminator the direct sun
                 // term turns warm orange and the sky ambient turns dusk
                 // red-purple (the old fixed white/blue lit the towers the
-                // same at noon and sunset)
+                // same at noon and sunset).
+                // M11w9: transition narrowed 0.05-0.45 -> 0.02-0.18 and a
+                // sunset brightness dim added (matches the shell's M11w9
+                // change) — the old window painted a ~2500 km saturated
+                // salmon band across the terminator, visible from orbit.
                 float sunHs2 = clamp(dot(normalize(p), uSunDir), -1.0, 1.0);
                 vec3 sunCol = mix(vec3(1.0, 0.45, 0.20), vec3(1.0, 0.98, 0.95),
-                                  smoothstep(0.05, 0.45, sunHs2));
+                                  smoothstep(0.02, 0.18, sunHs2));
                 vec3 ambCol = mix(vec3(0.50, 0.38, 0.48), vec3(0.62, 0.68, 0.80),
                                   smoothstep(-0.02, 0.30, sunHs2));
                 vec3 lit = sunCol * shadow * phase * (0.55 + 0.45 * powder)
+                         * mix(0.55, 1.0, smoothstep(-0.05, 0.28, sunHs2))
                          + ambCol * (0.55 + 0.35 * clamp(cloudHeightE(p), 0.0, 1.2)); // sky ambient
                 // M11n9g: city glow on cloud bases — over a night-side city
                 // (the SAME 3-octave population field the terrain's city
