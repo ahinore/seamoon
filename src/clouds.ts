@@ -161,7 +161,7 @@ export const cloudWeatherGLSL = (p: string): string => /* glsl */ `
 export const cloudShadowDeckGLSL = (p: string): string => /* glsl */ `
       float ${p}shadowDeck(vec3 upW, vec3 pX, vec3 windS, float time,
                            float coverU, float camAltKm) {
-        float wTime = time * 2e-5;
+        float wTime = time * 2.8e-5;
         float weatherM = ${p}fbm2(upW * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
         float lat = asin(clamp(upW.y, -1.0, 1.0));
         float bands = 0.55 + 0.45 * cos(lat * 6.0) * 0.5 + 0.25 * exp(-pow((abs(lat) - 0.15) * 3.0, 2.0));
@@ -179,12 +179,13 @@ export const cloudShadowDeckGLSL = (p: string): string => /* glsl */ `
         f1s /= max(ampSumS, 0.15);
         float sysS = max(0.62 * smoothstep(0.30, 0.62, weatherM)
                          + 0.38 * f1s * smoothstep(0.30, 0.55, weatherM),
-                         0.62 * smoothstep(0.30, 0.62, weatherM) - 0.10);
-        float thrS = mix(0.68, 0.60, cover);
+                         0.62 * smoothstep(0.30, 0.62, weatherM) - 0.18);
+        // M11w8 SPARSE: identical values to the shell/march chain
+        float thrS = mix(0.71, 0.63, cover);
         float sysDeck = pow(smoothstep(thrS, thrS + 0.06,
-                                       max(sysS, thrS - 0.055)), 0.45);
+                                       max(sysS, thrS - 0.035)), 0.45);
         sysDeck *= max(max(smoothstep(0.34, 0.55, weatherM),
-                           0.12 * smoothstep(0.15, 0.35, weatherM)), 0.16);
+                           0.12 * smoothstep(0.15, 0.35, weatherM)), 0.12);
         sysDeck = max(sysDeck, smoothstep(0.78, 0.92, sysS) * 0.35);
         // --- structured region x body with the march's soft macro modulator
         // (body threshold 0.55-0.66 = cloudDensity's M11n9l raised duty) ---
@@ -648,8 +649,10 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
         // Weather drift: wTime was uTime*0.002 q-units/s. One q-unit spans
         // ~4600 km of globe, so the weather gate slid at ~9 km/s — cloud
         // systems visibly crawled and morphed everywhere ("the deck boils
-        // when you approach"). 2e-5 q-units/s ≈ 92 m/s: calm jet-stream.
-        float wTime = uTime * 2e-5;
+        // when you approach"). 2.8e-5 q-units/s ≈ 130 m/s: moderate jet-
+        // stream — systems visibly EVOLVE over minutes (M11w8: user asked
+        // for wind/time influence; 92 m/s was imperceptibly slow).
+        float wTime = uTime * 2.8e-5;
         // MACRO WEATHER (2 octaves): the gate and cover thresholds ride
         // this, NOT the 4-octave weather. fbm4's finest octave (~300 km
         // value-noise cells) carved round pinholes into the deck wherever
@@ -777,8 +780,13 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // peak at 9.45 Mm). Genuine system gaps keep coming from the
           // weather gate (green class), not from fbm dips.
           float wSys = 0.62 * smoothstep(0.30, 0.62, weatherM);
+          // M11w8 SPARSE DECK: the floor was wSys-0.10, which kept every
+          // weather system FILLED solid edge to edge (the deck ran for
+          // hundreds of km without a gap -- "clouds continue forever").
+          // Real Earth systems are broken fields: let the fbm carve deeper
+          // into system interiors (-0.18) so genuine broken patches appear.
           float sys = max(wSys + 0.38 * f1 * smoothstep(0.30, 0.55, weatherM),
-                          wSys - 0.10);
+                          wSys - 0.18);
           // NO billow fold here: 1-|2f-1| paints a round fold-hole at every
           // lattice node, and thresholded from above those holes read as an
           // organized lace of circles ("noise when approaching"). The far
@@ -787,11 +795,14 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // mean 0.499, std 0.180. thr picks q70-q78 → ~33-40% coverage —
           // M11n7: discrete deck with ground gaps (Ace-Combat-style), was
           // q55-q72 (50-60% coverage — a continuous sheet from 20-25 km).
-          float thr = mix(0.68, 0.60, cover);
+          // M11w8 SPARSE: threshold +0.03 (mix(0.71, 0.63)) and a shallower
+          // dip floor (thr-0.035, was -0.055) -- broken system interiors and
+          // more open water between decks, matching real Earth coverage.
+          float thr = mix(0.71, 0.63, cover);
           // DIP FLOOR: cloudbg proved the dot holes are sys dips below thr
           // (red class). Shallow dips (the lattice-minima speckle) close by
-          // flooring the input 0.055 below thr — deep system gaps survive.
-          float d = smoothstep(thr, thr + 0.06, max(sys, thr - 0.055));
+          // flooring the input below thr -- deep system gaps survive.
+          float d = smoothstep(thr, thr + 0.06, max(sys, thr - 0.035));
           d = pow(d, 0.45); // saturate interior: translucent gray dots close
           // SINGLE soft gain: the double clamp (1.35 then 1.5) forced the
           // deck to binary alpha — during approach every edge pixel flipped
@@ -801,7 +812,8 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
                            0.12 * smoothstep(0.15, 0.35, weatherM));
           // M11n6: the shell gets the same unconditional dry-trough floor
           // as the march's macroM — orbit and ground must agree.
-          gate = max(gate, 0.16);
+          // M11w8 SPARSE: floor 0.16 -> 0.12 (dry troughs open wider).
+          gate = max(gate, 0.12);
           d *= gate;
           // M11n6b: the shell's sparse fair-weather puffs (sys top peaks) —
           // matches the march's 3 km sparse puffs so dry cells read as
@@ -917,8 +929,17 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
           // ray needs ~160 km to gain hull-height by curvature), so the
           // step at the horizontal plane cannot produce a visible seam.
           float upFrag = step(0.0, dot(rd, normalize(ro)));
+          // M11w8 CROSS-SECTION FIX: the uplooking fade was 1.2-4 km (M11w5),
+          // which left the sheet 2-8 km overhead at partial alpha -- flying
+          // at 10-12 km into the shell's altitude showed the flat sheet's
+          // cut cross-section as gray streak bands (user screenshot, 10.3 km
+          // pitch +19). Since M11w6 the march owns the deck the shell paints
+          // (full sys-deck union until the 11.5-12.8 km handoff), so the
+          // shell's NEAR fragments are redundant: widen the uplooking fade
+          // to 2-12 km so the sheet overhead melts away on approach while
+          // the far horizon band (100+ km fragments) stays untouched.
           shellA *= mix(smoothstep(0.0, 300.0, fragDist),
-                        smoothstep(1200.0, 4000.0, fragDist), upFrag);
+                        smoothstep(2000.0, 12000.0, fragDist), upFrag);
           // M11n9o: the shell's weight — full above the handoff; in-zone
           // the horizon band's own overlap weight (wShell is 0 there)
           shellA *= max(wShell, zoneBand);
@@ -1126,12 +1147,15 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             f1s /= max(ampSumS, 0.15);
             float sysS = max(0.62 * smoothstep(0.30, 0.62, weatherMm)
                              + 0.38 * f1s * smoothstep(0.30, 0.55, weatherMm),
-                             0.62 * smoothstep(0.30, 0.62, weatherMm) - 0.10);
-            float thrS = mix(0.68, 0.60, cover);
+                             0.62 * smoothstep(0.30, 0.62, weatherMm) - 0.18);
+            // M11w8 SPARSE: same +0.03 threshold / shallower dip floor /
+            // 0.12 gate floor as the shell's far map (kept identical so the
+            // march and the far map stay one field).
+            float thrS = mix(0.71, 0.63, cover);
             float sysDeck = pow(smoothstep(thrS, thrS + 0.06,
-                                           max(sysS, thrS - 0.055)), 0.45);
+                                           max(sysS, thrS - 0.035)), 0.45);
             sysDeck *= max(max(smoothstep(0.34, 0.55, weatherMm),
-                               0.12 * smoothstep(0.15, 0.35, weatherMm)), 0.16);
+                               0.12 * smoothstep(0.15, 0.35, weatherMm)), 0.12);
             sysDeck = max(sysDeck, smoothstep(0.78, 0.92, sysS) * 0.35);
             float dt = (t1 - t0) / float(steps);
             // Static dither (Interleaved Gradient Noise, Jimenez'): breaks

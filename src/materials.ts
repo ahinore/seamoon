@@ -390,20 +390,35 @@ export function makeSeaMaterial(shared: {
         return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
       }
 
-      // analytic Gerstner-ish wave normal: 3 octaves, phase from absolute pos
-      vec3 waveNormal(vec3 n, vec3 t, vec3 b, vec3 absP, float amp) {
-        vec2 d1 = vec2(0.8, 0.6);   // wave direction (unit)
+      // analytic Gerstner-ish wave normal — M11w8: 4 octaves with
+      // per-octave LOD weights (vec4 w = 400 m mega, 128 m swell, 32 m
+      // chop, 8 m ripple). The old single amp faded ALL octaves at high
+      // altitude, leaving a glassy flat ocean ("the sea looks flat");
+      // the 400/128 m swells stay resolved even at 100 m/px, so they can
+      // survive the far LOD while the short waves fade out.
+      vec3 waveNormal(vec3 n, vec3 t, vec3 b, vec3 absP, vec4 w) {
+        vec2 d0 = vec2(0.95, 0.31);  // wave directions (unit)
+        vec2 d1 = vec2(0.8, 0.6);
         vec2 d2 = vec2(-0.6, 0.8);
         vec2 d3 = vec2(0.45, -0.89);
+        float k0 = 6.2831853 / 400.0;  // 400 m mega swell (far-visible)
         float k1 = 6.2831853 / 128.0;  // 128 m swell
         float k2 = 6.2831853 / 32.0;   // 32 m chop
         float k3 = 6.2831853 / 8.0;    // 8 m ripples
+        float p0 = dot(absP.xz, d0) * k0 + uTime * 0.45;
         float p1 = dot(absP.xz, d1) * k1 + uTime * 1.2;
         float p2 = dot(absP.xz, d2) * k2 + uTime * 2.0;
         float p3 = dot(absP.xz, d3) * k3 + uTime * 3.1;
-        // slope in tangent frame (t = east-ish, b = north-ish)
-        float st = cos(p1) * k1 * amp + cos(p2) * k2 * amp * 0.5 * d2.x / d1.x + cos(p3) * k3 * amp * 0.22;
-        float sb = cos(p1) * k1 * amp * d1.y + cos(p2) * k2 * amp * 0.5 * d2.y + cos(p3) * k3 * amp * 0.22 * d3.y;
+        // slope in tangent frame (t = east-ish, b = north-ish);
+        // wave heights: 3 m / 1.8 m / 0.8 m / 0.28 m
+        float st = cos(p0) * k0 * 3.0 * w.x
+                 + cos(p1) * k1 * 1.8 * w.y
+                 + cos(p2) * k2 * 0.8 * w.z * d2.x / d1.x
+                 + cos(p3) * k3 * 0.28 * w.w;
+        float sb = cos(p0) * k0 * 3.0 * w.x * d0.y
+                 + cos(p1) * k1 * 1.8 * w.y * d1.y
+                 + cos(p2) * k2 * 0.8 * w.z * d2.y
+                 + cos(p3) * k3 * 0.28 * w.w * d3.y;
         return normalize(n - t * st * 0.35 - b * sb * 0.35);
       }
 
@@ -441,15 +456,37 @@ export function makeSeaMaterial(shared: {
 
         // ---- wave LOD selection (px per reference 1024 m patch) ----
         float pxPerPatch = 1024.0 / vPxPerM;
-        // wave amplitude fades with depth (surf zone damping) and with
-        // grazing LOD: far view = glassy (glint only)
+        // per-octave weights (M11w8): short waves still fade with LOD
+        // (subpixel at range), the long swells survive — the ocean now
+        // shows rolling undulation from every altitude instead of going
+        // glassy flat
         float nearW = clamp((pxPerPatch - 24.0) / 200.0, 0.0, 1.0);
         float midW  = clamp((pxPerPatch - 2.0) / 60.0, 0.0, 1.0) * (1.0 - nearW);
-        float amp = nearW * 0.9 + midW * 0.45;
-        amp *= clamp(vDepth / 25.0, 0.15, 1.0); // calm in the surf zone
+        float farW  = clamp((pxPerPatch - 2.0) / 14.0, 0.0, 1.0);
+        vec4 wamp = vec4(farW * 0.65 + midW * 0.35,  // 400 m mega swell
+                         farW * 0.9 + midW * 0.5,    // 128 m swell
+                         midW * 0.85 + nearW * 0.4,  // 32 m chop
+                         nearW);                     // 8 m ripple
+        // calm in the surf zone
+        wamp *= clamp(vDepth / 25.0, 0.15, 1.0);
 
         vec3 N = N0;
-        if (amp > 0.001) N = waveNormal(N0, t0, b0, vAbsPos, amp);
+        if (dot(wamp, vec4(1.0)) > 0.001) N = waveNormal(N0, t0, b0, vAbsPos, wamp);
+        // M11w8: noise jitter — two drifting noise scales break the
+        // pure-sine regularity into wind-driven texture (cat's paws),
+        // strongest where the swells are visible (far LOD)
+        float jw = (0.22 * farW + 0.12 * midW + 0.08 * nearW)
+                 * clamp(vDepth / 25.0, 0.15, 1.0);
+        if (jw > 0.001) {
+          float j1 = cwnoise3(vec3(vAbsPos.x, vAbsPos.z, vAbsPos.y)
+                              * (1.0 / 73.0)
+                              + vec3(uTime * 0.02, -uTime * 0.013, 0.0)) - 0.5;
+          float j2 = cwnoise3(vec3(vAbsPos.z, vAbsPos.x, vAbsPos.y)
+                              * (1.0 / 19.0)
+                              + vec3(-uTime * 0.03, uTime * 0.021, 0.0)) - 0.5;
+          N = normalize(N - t0 * (j1 * 0.65 + j2 * 0.35) * jw
+                          - b0 * (j1 * 0.35 + j2 * 0.65) * jw);
+        }
 
         // ---- water body color: deep -> shallow by depth ----
         vec3 deep = vec3(0.012, 0.055, 0.115);
