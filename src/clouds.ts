@@ -110,6 +110,96 @@ export const cloudWeatherGLSL = (p: string): string => /* glsl */ `
         for (int i = 0; i < 4; i++) { s += a * ${p}noise3(pw); pw *= 2.13; a *= 0.5; }
         return s;
       }
+      // M11w7: the shell/march sys field's fbm (fbm3oLod) — EXACT port of
+      // clouds.ts's version (same octaves, same gating, same warp) so the
+      // cloud SHADOW evaluates the same deck the hulls draw. camAltKm keys
+      // the octave gates (altitude LOD); on the ground pass the CAMERA's
+      // altitude so the shadow matches the deck the pilot sees.
+      float ${p}fbm3oLod(vec3 p, vec3 pU, float camAltKm, float detail,
+                         out float ampSum) {
+        #define ${p}OCT_GATE(loKm, hiKm) smoothstep(hiKm, loKm, camAltKm)
+        float g0 = ${p}OCT_GATE(300.0, 420.0);
+        float g1 = ${p}OCT_GATE(700.0, 1000.0);
+        float g2 = ${p}OCT_GATE(2200.0, 3200.0);
+        float g3 = ${p}OCT_GATE(6000.0, 9000.0);
+        #undef ${p}OCT_GATE
+        vec3 w = (${p}gnoise3(pU * 0.461 + 7.7) * 0.45
+                + ${p}gnoise3(pU + 31.7) * 0.30) * vec3(1.0, 0.8, 1.1);
+        float v4 = 0.5 + (${p}gnoise3(pU * 0.2135 + 41.3)
+                        + ${p}gnoise3(vec3(pU.z, pU.x, pU.y) * 0.3019 + 13.9)
+                        + ${p}gnoise3(pU * 0.3630 + 77.7)) * 0.40;
+        float b3 = g3;
+        float v3 = mix(v4, 0.5 + ${p}gnoise3(pU * 0.461 + 7.7) * 1.2, b3);
+        float b2 = g2;
+        float v2 = mix(v3, 0.5 + ${p}gnoise3(p + w) * 1.2, b2);
+        float b1 = min(g1, b2);
+        vec3 p2 = vec3(p.y, p.z, p.x);
+        float v1 = mix(v2, 0.5 + ${p}gnoise3(p2 * 2.17 + w) * 1.2, b1);
+        float b0 = min(g0, b1) * detail;
+        vec3 p3r = vec3(p.z, p.x, p.y);
+        float v0 = mix(v1, 0.5 + ${p}gnoise3(p3r * 4.71 + w) * 1.2, b0);
+        ampSum = 1.0;
+        return 0.20 * v4 + 0.26 * v3 + 0.30 * v2 + 0.14 * v1 + 0.10 * v0;
+      }
+`;
+
+/**
+ * M11w7 SHADOW DECK: GLSL for a function returning the near march's cloud
+ * density at the sun-ray's slab crossing — the UNION the march draws since
+ * M11w6 (structured region x body + the far map's sys deck), so ground
+ * shadows fall under every cloud the hulls paint. Must be used together
+ * with cloudWeatherGLSL (same prefix).
+ *
+ * shadowDeck(upW, pX, windS, time, coverU, camAltKm):
+ *   upW      = normalize(slab crossing point)
+ *   pX       = slab crossing point (planet frame)
+ *   windS    = wind offset in meters (uTime * 4.5 family)
+ *   time     = weather clock (uTime / uWTime)
+ *   coverU   = shared coverage uniform (uCover)
+ *   camAltKm = camera altitude in km (the march's LOD key)
+ */
+export const cloudShadowDeckGLSL = (p: string): string => /* glsl */ `
+      float ${p}shadowDeck(vec3 upW, vec3 pX, vec3 windS, float time,
+                           float coverU, float camAltKm) {
+        float wTime = time * 2e-5;
+        float weatherM = ${p}fbm2(upW * 2.2 + vec3(wTime, wTime * 0.7, -wTime * 0.6));
+        float lat = asin(clamp(upW.y, -1.0, 1.0));
+        float bands = 0.55 + 0.45 * cos(lat * 6.0) * 0.5 + 0.25 * exp(-pow((abs(lat) - 0.15) * 3.0, 2.0));
+        float cover = clamp(coverU * bands * 1.6 * weatherM + (weatherM - 0.5) * 0.4, 0.0, 1.0);
+        cover = pow(cover, 0.7);
+        // --- sys deck: the far map's field (same formula as the shell) ---
+        vec3 spR = upW * (uPlanetR + 3000.0);
+        vec3 spX = vec3(spR.x * 0.8660254 - spR.z * 0.5, spR.y,
+                        spR.x * 0.5 + spR.z * 0.8660254);
+        vec3 pwF = vec3(spX.x * 0.62, spX.y * 1.38, spX.z * 0.62)
+                 * (1.0 / 70000.0) + windS * (1.0 / 70000.0);
+        vec3 pwU = spR * (1.0 / 70000.0) + windS * (1.0 / 70000.0);
+        float ampSumS;
+        float f1s = ${p}fbm3oLod(pwF, pwU, camAltKm, 1.0, ampSumS);
+        f1s /= max(ampSumS, 0.15);
+        float sysS = max(0.62 * smoothstep(0.30, 0.62, weatherM)
+                         + 0.38 * f1s * smoothstep(0.30, 0.55, weatherM),
+                         0.62 * smoothstep(0.30, 0.62, weatherM) - 0.10);
+        float thrS = mix(0.68, 0.60, cover);
+        float sysDeck = pow(smoothstep(thrS, thrS + 0.06,
+                                       max(sysS, thrS - 0.055)), 0.45);
+        sysDeck *= max(max(smoothstep(0.34, 0.55, weatherM),
+                           0.12 * smoothstep(0.15, 0.35, weatherM)), 0.16);
+        sysDeck = max(sysDeck, smoothstep(0.78, 0.92, sysS) * 0.35);
+        // --- structured region x body with the march's soft macro modulator
+        // (body threshold 0.55-0.66 = cloudDensity's M11n9l raised duty) ---
+        float regionN = ${p}noise3(pX * (1.0 / 60000.0) + windS * (1.0 / 60000.0));
+        float region = smoothstep(0.50, 0.60, regionN);
+        float bodyN = ${p}noise3(pX * (1.0 / 4000.0) + windS * (1.0 / 4000.0));
+        float body = smoothstep(0.55, 0.66, bodyN);
+        float macroThr = mix(0.60, 0.50, cover);
+        float macroM = pow(smoothstep(macroThr, macroThr + 0.16,
+                                      max(sysS, macroThr - 0.055)), 0.45)
+                     * max(smoothstep(0.34, 0.55, weatherM),
+                           0.12 * smoothstep(0.15, 0.35, weatherM));
+        float deck = region * mix(0.55, 1.0, body) * (0.3 + 0.7 * macroM);
+        return max(deck, sysDeck);
+      }
 `;
 
 export function makeCloudUniforms(planetR: number): CloudUniforms {

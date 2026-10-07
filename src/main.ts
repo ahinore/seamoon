@@ -479,7 +479,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w6-sysdeck';
+const SIM_VERSION = 'sim v11.9w7-shadow';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -752,6 +752,16 @@ for (let i = 0; i < speedup; i++) {
   clouds.children[0].renderOrder = 5;
   cloudUniforms.uCamPos.value.copy(rig.camera.position);
   cloudUniforms.uOrigin.value.copy(world.origin);
+  // M11w7: camera altitude for the terrain/sea cloud-shadow LOD key — the
+  // shadow's sys field is octave-gated on camAlt/1000 exactly like the
+  // march's (ro = uCamPos + uOrigin in the cloud shader, so the same sum
+  // here; hypot avoids a per-frame vector allocation)
+  {
+    const p = rig.camera.position, o = world.origin;
+    const camAltM = Math.hypot(p.x + o.x, p.y + o.y, p.z + o.z) - R;
+    material.uniforms.uCamAlt.value = camAltM;
+    seaMaterial.uniforms.uCamAlt.value = camAltM;
+  }
   // ?wt=SECONDS: freeze the weather-clock for deterministic cloud A/B
   // (the field drifts with wall clock; tests must pin it to compare
   // march vs far shell at the same weather phase).
