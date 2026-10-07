@@ -1017,6 +1017,32 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
             // the d multiply below) — the M11n6 hard gate + floor chain is
             // gone; the new region/body/tower structure owns coverage.
             dbgMacro = macroM;
+            // M11w6 FULL COVERAGE: the far map's sys deck becomes an
+            // ADDITIONAL density source in the march (a union with the
+            // structured region/body clouds). The shell paints its deck
+            // wherever the weather systems are established (~33-40% of the
+            // planet), but the march's clouds live only inside
+            // region(25%) x body(~12% duty) cells — vast stretches the far
+            // map showed as deck had no near clouds at all (user: "the
+            // near clouds are drawn only in part; draw them everywhere the
+            // far clouds are"). Evaluate the shell's EXACT deck field —
+            // same sys formula, same thr/dip-floor/pow/gate/sparse chain,
+            // same altitude-keyed octave LOD (camAlt/1000, not macroM's
+            // fixed 512 km gate) — so near and far agree by construction
+            // at every altitude and the 18-32 km handoff into the shell's
+            // band is a field-continuous join.
+            float ampSumS;
+            float f1s = fbm3oLod(pwFM, pwUM, camAlt / 1000.0, 1.0, ampSumS);
+            f1s /= max(ampSumS, 0.15);
+            float sysS = max(0.62 * smoothstep(0.30, 0.62, weatherMm)
+                             + 0.38 * f1s * smoothstep(0.30, 0.55, weatherMm),
+                             0.62 * smoothstep(0.30, 0.62, weatherMm) - 0.10);
+            float thrS = mix(0.68, 0.60, cover);
+            float sysDeck = pow(smoothstep(thrS, thrS + 0.06,
+                                           max(sysS, thrS - 0.055)), 0.45);
+            sysDeck *= max(max(smoothstep(0.34, 0.55, weatherMm),
+                               0.12 * smoothstep(0.15, 0.35, weatherMm)), 0.16);
+            sysDeck = max(sysDeck, smoothstep(0.78, 0.92, sysS) * 0.35);
             float dt = (t1 - t0) / float(steps);
             // Static dither (Interleaved Gradient Noise, Jimenez'): breaks
             // the concentric step-quantization bands of a uniform march.
@@ -1060,6 +1086,16 @@ export function makeCloudMesh(planetR: number, uniforms: CloudUniforms): THREE.G
               // structure comes from cloudDensity's region/body/tower; the
               // macro field only thickens/thins the density.
               d *= (0.3 + 0.7 * macroM);
+              // M11w6: union with the far map's sys deck — the macro
+              // systems fill the same soft vertical band as the structured
+              // deck (vertBase profile: fade-in 0-0.1, fade-out 0.70-2.20
+              // slab units), so from below/inside the deck the near view
+              // shows every system the far map paints.
+              float hE6 = (length(p) - uPlanetR - ${CLOUD_BOTTOM.toFixed(1)}) /
+                          ${((CLOUD_TOP - CLOUD_BOTTOM)).toFixed(1)};
+              float vb6 = smoothstep(0.0, 0.10, hE6)
+                        * (1.0 - smoothstep(0.70, 2.20, hE6));
+              d = max(d, sysDeck * vb6);
               if (i == 0) dbgD = d;
               // M11n9b diagnostic: sample the gate layers at the mid point
               if (i == steps / 2) {
