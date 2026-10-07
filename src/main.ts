@@ -181,6 +181,7 @@ const sunDisc = makeSunDisc(SUN_DIST);
 scene.add(sunDisc);
 if (urlParams.get('sun') === '0') sunDisc.visible = false;
 const _sunPos = new THREE.Vector3();
+const _moonNdc = new THREE.Vector3(); // loddbg: moon screen position (NDC)
 
 // Phase 5: atmosphere shell. The mesh sits at the frame-relative planet
 // center (-origin each frame) and its shader takes the frame-relative
@@ -479,7 +480,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w9-terminator';
+const SIM_VERSION = 'sim v11.9w10b-moonshot';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -892,6 +893,7 @@ for (let i = 0; i < speedup; i++) {
     `revz ${(renderer as unknown as { capabilities: { reverseDepthBuffer: boolean } }).capabilities.reverseDepthBuffer ? 'ON' : 'off'}  aa ${urlParams.get('aa') === '0' ? 'off' : 'on'}`,
     `dbg cam=(${rig.camera.position.x.toFixed(0)},${rig.camera.position.y.toFixed(0)},${rig.camera.position.z.toFixed(0)}) org=(${world.origin.x.toFixed(0)},${world.origin.y.toFixed(0)},${world.origin.z.toFixed(0)})`,
     `tiles ${s.visibleTiles}  tris ${(s.triangles / 1000).toFixed(1)}k  maxLvl ${s.maxVisibleLevel}`,
+    ...(urlParams.has('loddbg') ? [`perL ${(s.perLevel ?? []).map((v, i) => v ? `${i}:${v}` : null).filter(Boolean).join(' ')} fwd(${(() => { const f = new THREE.Vector3(); rig.camera.getWorldDirection(f); return `${f.x.toFixed(2)},${f.y.toFixed(2)},${f.z.toFixed(2)}`; })()}) cam(${rig.camera.position.x.toFixed(0)},${rig.camera.position.y.toFixed(0)},${rig.camera.position.z.toFixed(0)}) near${rig.camera.near.toFixed(1)} far${rig.camera.far}`, `moonNdc ${((_moonNdc.copy(MOON.center).sub(world.origin).project(rig.camera))) ? `${_moonNdc.x.toFixed(3)},${_moonNdc.y.toFixed(3)}` : 'n/a'}`] : []),
     `sea tiles ${sea.stats.visibleTiles}  tris ${(sea.stats.triangles / 1000).toFixed(1)}k  maxLvl ${sea.stats.maxVisibleLevel}`,
     `queue ${s.pending}  cache ${s.cached}  built ${s.built} (wk ${s.workerBuilt})  evicted ${s.evicted}  hits ${s.cacheHits}  veg ${planet.vegTiles}`,
     `drawcalls ${renderer.info.render.calls}`,
