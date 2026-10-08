@@ -12,13 +12,9 @@ const DEG = Math.PI / 180;
 const R = EARTH.radius;
 const MU = EARTH.mu;
 const R_MOON = MOON.radius;
-// M11w10 moonshot cinematic timing (sim seconds; the ascent runs at warp 3-3.5)
-/** Pre-launch pad hold — the camera frames the moon over the horizon. */
+// M11w12 moonshot cinematic timing (sim seconds; the ascent runs at warp 3-8)
+/** Pre-launch pad hold — the camera frames the beach and the sea horizon. */
 const MS_HOLD_S = 24;
-/** Stage-2 push length before the cut to the parking orbit (195 sim s at
- *  warp 8 ≈ 24 wall s — the arc ends near 270 km / 6 km/s, so the cut to
- *  the 250 km parking orbit is nearly continuous). */
-const MS_S2_CLIMB_S = 195;
 const MU_MOON = MOON.mu;
 
 // --- aircraft parameters (light single, arcade-tuned) ---
@@ -156,6 +152,9 @@ export class FlightModel {
   private msT = 0;
   /** M11w10 moonshot night-side deorbit done flag. */
   private msDeorbit = false;
+  /** M11w12 pad/climb look bearing (rad about up from nHat×up), sampled
+   *  toward the nearest sea at pad init so the beach stays framed. */
+  private msBeachAz = 0;
   /** M11j moonshot staging-event counter for the audio crack. */
   msStageEvents = 0;
   /** M11j: true while a moonshot demo owns the moon's placement (main.ts
@@ -388,15 +387,71 @@ export class FlightModel {
         // the ?loddbg=1 moonNdc line, clear of the debug panel). The
         // insertion state is hard-overwritten at the orbit cut, so the pad's
         // position is free.
-        const padAng = (Number(new URLSearchParams(location.search).get('mspad')) || 112) * DEG;
-        const padDir = _oUp.set(Math.cos(padAng), Math.sin(padAng) * si, Math.sin(padAng) * ci).normalize();
-        // in-plane downrange tangent t(a) = sin(a)·ê1 − cos(a)·ê2 points
-        // toward decreasing a (the +X insertion / sunset side from this pad)
-        const tanDir = _oRail.set(Math.sin(padAng), -Math.cos(padAng) * si, -Math.cos(padAng) * ci).normalize();
-        const up = _oUp.copy(padDir);
+        // M11w12: the launch site is a BEACH in the DAY region (user beat).
+        // The transfer redirect repositions the moon to the antipode of the
+        // ACTUAL pad, so the site is free to slide along the orbit circle.
+        // Search the sunny arc 6°..45° (verified bright day by the M11w12
+        // pad scans: mspad 6-45 all daylight, 0 and 15+ are ocean) for a
+        // low sand spot (5..300 m) with open water within ~13 km; a ?mspad=
+        // override pins the circle angle directly (old behaviour).
+        const padAt = (th: number) =>
+          _oB4.set(Math.cos(th), Math.sin(th) * si, Math.sin(th) * ci).normalize();
+        const mspadQ = Number(new URLSearchParams(location.search).get('mspad'));
+        let padDir: THREE.Vector3;
+        if (mspadQ) {
+          padDir = _oUp.copy(padAt(mspadQ * DEG));
+        } else {
+          let bestTh = 12 * DEG, bestScore = -Infinity;
+          const nHs = _oB3.set(0, si, ci);
+          for (let thD = 6; thD <= 45; thD += 0.05) {
+            const th = thD * DEG;
+            const d = padAt(th);
+            const h = terrainHeight(d.x, d.y, d.z);
+            if (h < 3 || h > 80) continue;
+            const tanS = _oB2.copy(nHs).cross(d).normalize();
+            const sideS = new THREE.Vector3().copy(d).cross(tanS).normalize();
+            let seaBearings = 0;
+            for (let k = 0; k < 16; k++) {
+              const az = (k / 16) * Math.PI * 2;
+              const dir = new THREE.Vector3().copy(tanS).multiplyScalar(Math.cos(az))
+                .addScaledVector(sideS, Math.sin(az));
+              const smp = new THREE.Vector3().copy(d).addScaledVector(dir, 0.0008).normalize();
+              if (terrainHeight(smp.x, smp.y, smp.z) < -5) seaBearings++;
+            }
+            const score = seaBearings * 10 - Math.abs(h - 25) / 25;
+            if (score > bestScore) { bestScore = score; bestTh = th; }
+          }
+          padDir = _oUp.copy(padAt(bestTh));
+        }
+        const up = padDir;
         const padTh = terrainHeight(up.x, up.y, up.z);
         this.pos.copy(up).multiplyScalar(R + Math.max(padTh, 0) + 50);
         this.vel.set(0, 0, 0); // rest on the pad
+        // M11w12: aim the pad/climb look at the CLOSEST open water — sample
+        // rings at 3/6/13/32/64 km on 24 bearings and take the bearing whose
+        // nearest water ring is closest. (Far water hides below the horizon
+        // from a low beach pad — the previous deepest-point rule aimed at
+        // ocean 100+ km out and showed only sand.)
+        {
+          const nH = new THREE.Vector3(0, si, ci);
+          const tanP = new THREE.Vector3().copy(nH).cross(up).normalize();
+          const sideP = new THREE.Vector3().copy(up).cross(tanP).normalize();
+          const rings = [0.0005, 0.001, 0.002, 0.005, 0.01]; // 3/6/13/32/64 km
+          let bestAz = 0, bestRing = rings.length;
+          for (let k = 0; k < 24; k++) {
+            const az = (k / 24) * Math.PI * 2;
+            for (let ri = 0; ri < rings.length; ri++) {
+              const dir = new THREE.Vector3().copy(tanP).multiplyScalar(Math.cos(az))
+                .addScaledVector(sideP, Math.sin(az));
+              const smp = new THREE.Vector3().copy(up).addScaledVector(dir, rings[ri]).normalize();
+              if (terrainHeight(smp.x, smp.y, smp.z) < -5) {
+                if (ri < bestRing) { bestRing = ri; bestAz = az; }
+                break;
+              }
+            }
+          }
+          this.msBeachAz = bestAz;
+        }
         this.q.identity();
         this.thr = 0;
         this.frozen = false;
@@ -874,7 +929,10 @@ export class FlightModel {
     // speed instead of the old 20000x blink.
     if (this.moonshot) {
       if (this.apPhase === 'boost') {
-        wdt = dt * (this.msStage === 1 ? 3 : 8);
+        // M11w12: stage 3 = the radial coast to the "whole Earth" altitude
+        // (MECO2 → redirect). A radial recede shows no surface scrolling,
+        // so 100x stays visually calm while compressing the ~55 min climb.
+        wdt = dt * (this.msStage === 1 ? 3 : this.msStage === 3 ? 100 : 8);
       } else if (this.apPhase === 'coast') {
         // one LEO lap ≈ 27 wall s. 200x (not 300x): the terrain tile
         // builder starves above ~100 km/frame of sub-point motion and the
@@ -885,17 +943,26 @@ export class FlightModel {
         // emerges from behind its limb in this window), then ramp hard for
         // the cruise once the earth has left the frame
         const rE = _oR.copy(this.pos).length() - R;
-        const w = rE < 8e6 ? 150
+        let w = rE < 8e6 ? 150
           : rE < 6e7 ? 150 + (12000 - 150) * ((rE - 8e6) / 5.2e7)
           : 12000;
+        // M11w12: ease off near the moon — the approach, SOI capture and
+        // landing approach must read slow (user beat)
+        const mD = _oR.copy(this.moonC).sub(this.pos).length();
+        if (mD < 1e8) w = Math.min(w, 6000);
+        if (mD < 5e7) w = Math.min(w, 1200);
+        if (mD < 2e7) w = Math.min(w, 400);
         wdt = dt * w;
       } else if (this.apPhase === 'lunar-orbit' && this.fullMission) {
         // the capture ellipse falls from ~66 Mm: cruise down fast, easing
         // off as the surface nears (the descent cap below takes the last
         // 200 km)
         const rAg = _oR.copy(this.pos).sub(this.moonC).length() - R_MOON;
-        wdt = dt * (rAg > 5e6 ? 12000
-          : 30 + (12000 - 30) * clamp((rAg - 2e5) / 4.8e6, 0, 1));
+        // M11w12: 4000 cruise cap (was 12000) — the capture fall stays
+        // watchable near the moon (user beat); the ease to 30x takes over
+        // inside 20 Mm
+        wdt = dt * (rAg > 2e7 ? 4000
+          : 30 + (4000 - 30) * clamp((rAg - 2e5) / 1.98e7, 0, 1));
       }
     }
     // M11: auto-drop warp for the powered descent — 20000x would hand
@@ -961,9 +1028,8 @@ export class FlightModel {
       // M11w10: proper in-plane tangent in the moon's orbit plane
       // (ê1=+X, ê2=nHat). The old n̂×up formula degenerated for pads away
       // from +X (it returned the plane normal, not the tangent). Sense:
-      // toward the +X insertion hemisphere from the pad.
-      const aPos = Math.atan2(this.pos.dot(nHat), this.pos.x);
-      const tanB = _oRail.set(Math.sin(aPos), -Math.cos(aPos) * Math.sin(INCLINATION), -Math.cos(aPos) * Math.cos(INCLINATION)).normalize();
+      // (M11w12: the straight-up profile needs no in-plane tangent —
+      // thrust is purely radial, see the pitch code below.)
       this.msT += wdt;
       // M11w10 pre-launch hold: the first MS_HOLD_S seconds sit on the pad
       // with engines off (the camera holds the moon-over-horizon shot),
@@ -996,22 +1062,13 @@ export class FlightModel {
       // of thrustDir/throttle below.
       let thrustDir: THREE.Vector3;
       // M11w10: no prop burn during the pre-launch hold
-      const throttle = this.msT < MS_HOLD_S && this.msStage === 1 ? 0 : 1;
-      if (this.msStage === 1) {
-        // stage 1: classic pitch program (90° → 55° over the burn minute)
-        const pitchDeg = clamp(90 - (msTBurn / 60) * 35, 55, 90);
-        const rad = pitchDeg * Math.PI / 180;
-        thrustDir = _oV.copy(upB).multiplyScalar(Math.sin(rad))
-          .addScaledVector(tanB, Math.cos(rad)).normalize();
-      } else {
-        // M11w10 stage-2 push: the gravity turn continues 55° → 18°; the
-        // stack arcs over slightly at the very end — the cut below rescues
-        // the state, and the scripted camera never follows the nose anyway.
-        const pitchDeg = clamp(55 - (this.msT / MS_S2_CLIMB_S) * 37, 18, 55);
-        const rad = pitchDeg * Math.PI / 180;
-        thrustDir = _oV.copy(upB).multiplyScalar(Math.sin(rad))
-          .addScaledVector(tanB, Math.cos(rad)).normalize();
-      }
+      const throttle = (this.msT < MS_HOLD_S && this.msStage === 1)
+        || this.msStage === 3 ? 0 : 1;
+      // M11w12: STRAIGHT-UP ascent (user beat) — no gravity turn. Stages 1+2
+      // thrust radially until MECO2 (the vertical speed suffices for an
+      // ~8 Mm apogee), then stage 3 coasts radially to the "whole Earth"
+      // altitude, where the redirect below burns onto the lunar transfer.
+      thrustDir = _oV.copy(upB);
       // M11j: reserve guard — if the remaining prop can no longer reach
       // the insertion gate, cut to the reserve and circularize NOW on
       // the patched conic with whatever altitude the arc has reached
@@ -1079,6 +1136,43 @@ export class FlightModel {
         this.note = 'ORBIT';
         elementsOf(_oR.copy(this.pos).sub(this.primC), this.vel, this.primMu, this.el);
       }
+      // M11w12: straight-up profile — MECO2 when the radial speed suffices
+      // for an ~8 Mm apogee (the whole 26° disc fits the 30° half-FOV from
+      // ~6.4 Mm). Stage 3 then coasts radially (warp 100) to ~7.6 Mm.
+      if (this.msStage === 2 && this.apPhase === 'boost') {
+        const upI = _oUp.copy(this.pos).normalize();
+        const rI = this.pos.length();
+        if (this.vel.dot(upI) >= Math.sqrt(2 * MU * Math.abs(1 / rI - 1 / (R + 8e6)))) {
+          this.msStage = 3;
+          this.note = 'MECO2';
+        }
+      }
+      // M11w12: the transfer redirect at ~7.6 Mm — the demo OWNS the moon
+      // (same license as the orbit cut above): reposition it to the antipode
+      // of the actual redirect point so the transfer apogee lands on it,
+      // then point the velocity along the in-plane tangent at transfer
+      // speed. Prop is charged via Tsiolkovsky (stage-2 ve); the spent
+      // stage jets. The camera is already at full nadir here (the whole
+      // Earth in frame) and the moon spawns at the nadir direction, so the
+      // phase cut is invisible; the Earth then shrinks off the moonward view.
+      if (this.msStage === 3 && this.apPhase === 'boost'
+        && this.pos.length() - R >= 7.6e6) {
+        const upI = _oUp.copy(this.pos).normalize();
+        const tanI = _oB3.copy(nHat).cross(upI).normalize();
+        const rI = this.pos.length();
+        const vTgt = Math.sqrt(MU * (2 / rI - 2 / (rI + MOON_ORBIT_R)));
+        const dv = Math.max(vTgt - this.vel.dot(tanI), 0);
+        this.vel.copy(tanI).multiplyScalar(vTgt);
+        this.moonC.copy(upI).multiplyScalar(-MOON_ORBIT_R);
+        MOON.center.copy(this.moonC);
+        this.prop = Math.max(
+          this.prop - (this.mLand + this.prop) * (1 - Math.exp(-dv / (1_400_000 / 105))), 210);
+        this.mLand = Math.max(this.mLand - 4800, 4200);
+        this.apPhase = 'trans-lunar';
+        this.orbT = 0;
+        this.note = 'REDIRECT';
+        elementsOf(_oR.copy(this.pos).sub(this.primC), this.vel, this.primMu, this.el);
+      }
       // insertion safety: if stage 2 ran out of prop below orbital speed,
       // fall back to ballistic (the coast rail keeps whatever orbit the
       // ascent achieved; TLI still fires on the node if the period > 0)
@@ -1088,37 +1182,9 @@ export class FlightModel {
         this.note = 'BURNOUT';
         elementsOf(_oR.copy(this.pos).sub(this.primC), this.vel, this.primMu, this.el);
       }
-      // M11w10: the cinematic ascent ends here — cut to the 250 km parking
-      // orbit and hand the state to the PROVEN full-mission pipeline
-      // (coast → TLI → SOI capture → powered descent, all verified by
-      // M11/M11g). The camera is already tilted down at the planet, so the
-      // cut reads as the planet receding rather than a snap.
-      if (this.msStage === 2 && this.msT >= MS_S2_CLIMB_S && this.apPhase === 'boost') {
-        this.mLand = Math.max(this.mLand - 4800, 4200);
-        // parking orbit state: 250 km circular, in the moon's orbit
-        // plane, at the +X node (antipode of the demo's moon)
-        const si = Math.sin(INCLINATION), ci = Math.cos(INCLINATION);
-        const rPark = R + 250_000;
-        this.pos.set(rPark, 0, 0);
-        // prograde tangent in-plane: ê2×ê1 (toward decreasing a — the TLI
-        // node returns here one lap later)
-        const nHatIns = _oB1.set(0, si, ci).normalize();
-        const upIns = _oUp.set(1, 0, 0);
-        const tanIns = _oRail.copy(nHatIns).cross(upIns).normalize();
-        this.vel.copy(tanIns).multiplyScalar(Math.sqrt(MU / rPark));
-        this.primC.set(0, 0, 0);
-        this.primMu = MU;
-        this.apPhase = 'coast';
-        this.orbT = 0;
-        this.note = 'ORBIT';
-        // the ascent stack is GONE with the cut (classic stage disposal):
-        // what remains is the lander + its budget. M11w10: 15 t — the
-        // night-side deorbit (~1.1 t) sits on top of the proven descent
-        // (~3.4-4.6 t) + TLI (~8.4 t), with margin to spare.
-        this.prop = 15_000;
-        elementsOf(_oR.copy(this.pos).sub(this.primC), this.vel, this.primMu, this.el);
-        return;
-      }
+      // M11w12: the old 250 km parking-orbit cut is GONE — the straight-up
+      // profile replaces it with MECO2 → radial coast → the transfer
+      // redirect above (the user's "地球全体が見えるまでまっすぐ上昇" beat).
       this.orbT -= wdt; // boost time is not coast time
     } else if (this.lob && this.apPhase === 'boost') {
       this.lobT += wdt;
@@ -1728,46 +1794,34 @@ export class FlightModel {
     // -- look direction per phase (unit vector from the craft) ------------
     let lookDir: THREE.Vector3 | null = null;
     if (this.apPhase === 'boost' || this.apPhase === 'off') {
-      // ASCENT: the horizon under the moon. The bearing is scripted (the
-      // moon's azimuth) and fixed through the climb, so the moon stays
-      // framed while the ground falls away; past the deck the look eases
-      // down toward the planet.
+      // M11w12 straight-up profile: the bearing is the SEAWARD bearing
+      // sampled at pad init (the pad is a beach — water stays on the
+      // horizon through the climb). A day-side pad has the moon on the far
+      // side of the planet, so there is no moon framing here; the look
+      // eases from the horizon to full nadir as altitude grows — past
+      // ~6.4 Mm the whole Earth disc (~26° radius) fits the 30° half-FOV
+      // (the user's "地球全体が見える" beat). The transfer redirect at
+      // ~7.6 Mm hands over a look that is ALREADY pointing at the moon
+      // (the moon spawns at the antipode = the nadir at that moment), so
+      // the phase cut is invisible.
       const si = Math.sin(INCLINATION), ci = Math.cos(INCLINATION);
-      const mH = _oV.copy(this.moonC).sub(this.pos);
-      mH.addScaledVector(up, -mH.dot(up));
-      if (mH.lengthSq() > 1) {
-        mH.normalize();
-        // bias the bearing ~30° around the local up (a true in-plane
-        // rotation) so the moon sits toward the upper RIGHT of the frame —
-        // the debug HUD panel covers the upper left, and an on-axis moon
-        // hides behind it (verified with the level camera: −side lands the
-        // moon at x≈407 behind the panel; +side puts it at x≈873)
-        {
-          const bias = 30 * DEG;
-          const side = _oB2.copy(up).cross(mH).normalize();
-          mH.multiplyScalar(Math.cos(bias)).addScaledVector(side, Math.sin(bias)).normalize();
-        }
-        const dC = this.primC.distanceTo(this.pos);
-        const hd = Math.sqrt(2 * dC * Math.max(this.tAgl, 1));
-        const aheadAbs = _oB2.copy(this.pos).addScaledVector(mH, clamp(hd * 0.75, 2e3, 3e6));
-        const surfaceR = dC - this.tAgl;
-        aheadAbs.sub(this.primC).setLength(surfaceR).add(this.primC);
-        lookDir = _oB3.copy(aheadAbs).sub(this.pos).normalize();
-        // raise the look ~30% toward the moon itself: the pad's moon rides
-        // 32° up, so the frame keeps both the moon (upper third) and the
-        // horizon (lower half)
-        const moonDir3 = _oV.copy(this.moonC).sub(this.pos).normalize();
-        lookDir.lerp(moonDir3, 0.3).normalize();
-        // tilt-down after the clouds: ~12% of the way to nadir by ~70 km —
-        // shallow enough that at the orbit cut the frame holds the moon
-        // (upper edge), the star field and the planet's limb+surface (lower
-        // half) TOGETHER — the user's "月がカメラに入りつつ地球全体が見える"
-        // beat — and the coast keeps the limb in view through the night-side
-        // crossing (no all-black frames)
-        const tilt = 0.12 * smoothstep(12, 70, this.tAgl / 1000);
-        if (tilt > 0) {
-          lookDir.lerp(_oV.copy(this.primC).sub(this.pos).normalize(), tilt).normalize();
-        }
+      const tanB2 = _oB4.copy(_oB2.set(0, si, ci)).cross(up).normalize();
+      const mH = _oV.copy(tanB2).multiplyScalar(Math.cos(this.msBeachAz))
+        .addScaledVector(_oB3.copy(up).cross(tanB2).normalize(), Math.sin(this.msBeachAz))
+        .normalize();
+      const dC = this.primC.distanceTo(this.pos);
+      const hd = Math.sqrt(2 * dC * Math.max(this.tAgl, 1));
+      const aheadAbs = _oB2.copy(this.pos).addScaledVector(mH, clamp(hd * 0.75, 2e3, 3e6));
+      const surfaceR = dC - this.tAgl;
+      aheadAbs.sub(this.primC).setLength(surfaceR).add(this.primC);
+      lookDir = _oB3.copy(aheadAbs).sub(this.pos).normalize();
+      // tilt: 12% toward nadir by ~70 km (keeps the beach + limb framed on
+      // the way up), then to full nadir by ~6.5 Mm so the whole disc is
+      // centred for the redirect
+      const tilt = 0.12 * smoothstep(12, 70, this.tAgl / 1000)
+        + 0.88 * smoothstep(2e6, 6.5e6, this.tAgl);
+      if (tilt > 0) {
+        lookDir.lerp(_oB4.copy(this.primC).sub(this.pos).normalize(), tilt).normalize();
       }
     } else if (this.apPhase === 'coast') {
       // LEO: continue the same ease across the lap (k 0.5 → 1 by p 0.55).
@@ -2197,6 +2251,7 @@ const _oNewV = new THREE.Vector3();
 const _oB1 = new THREE.Vector3();
 const _oB2 = new THREE.Vector3();
 const _oB3 = new THREE.Vector3();
+const _oB4 = new THREE.Vector3();
 
 const smoothstep = (e0: number, e1: number, x: number): number => {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
