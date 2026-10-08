@@ -283,7 +283,16 @@ moonFallbackMat.polygonOffset = true; // extra depth push: tiles always win
 moonFallbackMat.polygonOffsetFactor = 2;
 const moonFallback = new THREE.Mesh(buildMoonFallbackGeometry(), moonFallbackMat);
 moonFallback.renderOrder = -3; // after sun disc (-5), before tiles (0)
-moonView.root.add(moonFallback);
+// M11w13: the fallback lives in the SCENE, not under moonView.root. The
+// tile meshes are root children whose positions already carry
+// `node.center + bodyCenter - origin` (the absolute->frame map baked in at
+// show()/reposition time), so root itself must stay at (0,0,0) — main used
+// to ALSO translate root by `bodyCenter - origin`, double-counting the
+// offset: the moon's tiles rendered at 2x (bodyCenter - origin), i.e. a
+// displaced ghost sphere floating in front of the correctly-placed
+// fallback (the "two nested moons" report; Earth never showed it because
+// its bodyCenter is 0). The fallback is positioned per-frame below.
+scene.add(moonFallback);
 // sim clock for the orbit (performance.now-based; deterministic per session)
 const t0Sim = performance.now() / 1000;
 
@@ -480,7 +489,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w12-moonshot';
+const SIM_VERSION = 'sim v11.9w13-moonfix';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -792,7 +801,13 @@ for (let i = 0; i < speedup; i++) {
     moonPosition(performance.now() / 1000 - t0Sim, MOON.center);
   }
   moonView.bodyCenter.copy(MOON.center);
-  moonView.root.position.copy(moonView.bodyCenter).sub(world.origin);
+  // M11w13: root stays at (0,0,0) — the tile meshes already carry the
+  // absolute->frame map (node.center + bodyCenter - origin) individually,
+  // so translating root as well double-counted the offset (the ghost
+  // second moon). The fallback (scene child) is placed here instead.
+  moonFallback.position.copy(MOON.center).sub(world.origin);
+  if (urlParams.get('moon') === '0') moonFallback.visible = false;
+  if (urlParams.get('moonfb') === '0') moonFallback.visible = false; // M11w13 diagnosis
   // Nearest-body selection (M9.2): whichever surface the camera is closest
   // to (SOI handoff reference; steers the rig's altitude/zenith). The rule
   // lives in frames.ts (M9.6) — one definition for the whole app.
