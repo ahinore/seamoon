@@ -313,8 +313,9 @@ const hud = new Hud('hud');
 //   - radii still exaggerated x15 (capped to 45% of the panel so a close
 //     body does not swallow the map)
 // Plus a fullscreen HUD arrow layer (#dirs): a colored chevron + label for
-// Earth and Moon, placed at the body's on-screen direction when in view,
-// clamped to a screen-edge border when off-view or behind the camera.
+// Earth and Moon, always clamped to a border rectangle around the screen
+// center along the shortest on-screen direction — never on the body itself
+// (it overlapped the planet) and never lost when the body goes off-screen.
 const mapDiv = document.getElementById('map3d') as HTMLDivElement | null;
 const mapCanvas = document.getElementById('map3dgl') as HTMLCanvasElement | null;
 const radarCanvas = document.getElementById('radar') as HTMLCanvasElement | null;
@@ -396,36 +397,55 @@ function drawDirs(show: boolean): void {
   const tf = Math.tan(rig.camera.fov * Math.PI / 360);
   const aspect = rig.camera.aspect || 1;
   const cx = W / 2, cy = H / 2;
+  const placed: { x: number; y: number }[] = [];
   const arrow = (bodyAbs: THREE.Vector3, color: string, label: string) => {
     // body direction in camera space (-Z front, +X right, +Y up)
     _dirsD.copy(bodyAbs).sub(absCam).normalize().applyQuaternion(_dirsQ);
-    let sx: number, sy: number, onScreen = false;
-    if (_dirsD.z < -0.001) {
+    const front = _dirsD.z < 0;
+    let sx: number, sy: number;
+    if (front) {
       sx = (_dirsD.x / -_dirsD.z) / (tf * aspect);
       sy = (-_dirsD.y / -_dirsD.z) / tf;
-      onScreen = Math.abs(sx) < 0.88 && Math.abs(sy) < 0.82;
     } else {
       // behind the camera: the raw camera-space direction acts as a
       // screen-space pointer (y flipped to the screen convention)
       sx = _dirsD.x; sy = -_dirsD.y;
-      const l = Math.hypot(sx, sy);
-      if (l < 1e-6) { sx = 0; sy = 1; } else { sx /= l; sy /= l; }
     }
+    const l = Math.hypot(sx, sy);
     let px: number, py: number;
-    if (onScreen) {
-      px = cx + (sx * W) / 2;
-      py = cy + (sy * H) / 2;
+    if (l < 0.15) {
+      // dead ahead / dead behind: no meaningful screen bearing — use fixed
+      // slots (ahead = bottom-center pointing up, behind = top-center
+      // pointing down) so the chevron never sits on the body itself
+      if (front) { px = cx; py = H - 84; sx = 0; sy = -1; }
+      else { px = cx; py = 84; sx = 0; sy = 1; }
     } else {
-      // clamp to a border rectangle around the screen center
-      const l = Math.hypot(sx, sy) || 1;
+      // ALWAYS clamp to a border rectangle around the screen center along
+      // the shortest on-screen direction. The arrow is never drawn at the
+      // body's own position (it used to overlap the planet) and never
+      // disappears when the body leaves the screen.
       const nx = sx / l, ny = sy / l;
-      const t = Math.min((W / 2 - 52) / Math.max(Math.abs(nx), 1e-6),
-        (H / 2 - 42) / Math.max(Math.abs(ny), 1e-6));
+      const t = Math.min((W / 2 - 56) / Math.max(Math.abs(nx), 1e-6),
+        (H / 2 - 100) / Math.max(Math.abs(ny), 1e-6));
       px = cx + nx * t;
       py = cy + ny * t;
+      sx = nx; sy = ny;
+      // dodge the fixed panels: nav map (top-right), debug HUD (top-left)
+      if (px > W - 240 && py < 240) px = W - 240;
+      if (px < 540 && py < 290) px = 540;
+      // keep the two arrows from stacking on each other near the border
+      for (const p of placed) {
+        const d = Math.hypot(px - p.x, py - p.y);
+        if (d < 110) px += (px >= p.x ? 1 : -1) * (110 - d);
+      }
+      px = Math.min(Math.max(px, 30), W - 30);
+      placed.push({ x: px, y: py });
     }
     const ang = Math.atan2(sy, sx); // screen-space bearing (y grows down)
     ctx.save();
+    // dark halo so the chevron stays readable against a bright planet limb
+    ctx.shadowColor = 'rgba(0,0,0,0.9)';
+    ctx.shadowBlur = 4;
     ctx.translate(px, py);
     ctx.rotate(ang);
     ctx.fillStyle = color;
@@ -437,7 +457,11 @@ function drawDirs(show: boolean): void {
     ctx.fillStyle = color;
     ctx.font = '10px ui-monospace,Consolas,monospace';
     ctx.textAlign = 'center';
+    ctx.shadowColor = 'rgba(0,0,0,0.9)';
+    ctx.shadowBlur = 4;
     ctx.fillText(label, px, py + 21);
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
   };
   arrow(_radarEarth, '#6fb5ff', 'Earth');
   arrow(MOON.center, '#d0d0dc', 'Moon');
@@ -613,7 +637,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w16-navdir';
+const SIM_VERSION = 'sim v11.9w17-arrowfix';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
