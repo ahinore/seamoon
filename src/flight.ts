@@ -1716,15 +1716,12 @@ export class FlightModel {
    *                    past 45° the standard descent camera takes over
    */
   private moonshotLook(): boolean {
-    // ride position: craft + 30 m along up (same as the standard cam)
+    // ride position: craft + 30 m along up (same as the standard cam).
+    // M11w11: NO entry-rumble offset here — the moonshot is a cinematic
+    // choreography and the 61 Hz boost vibration read as camera shake
+    // (the standard camera below keeps it for reentry).
     const up = _oUp.copy(this.pos).sub(this.primC).normalize();
     const camAbs = _oB1.copy(this.pos).addScaledVector(up, 30);
-    if (this.shake > 0.003) {
-      const t = performance.now() / 1000;
-      const right = _oRail.copy(up).cross(this.WORLD_Y).normalize();
-      camAbs.addScaledVector(up, Math.sin(t * 61) * 0.6 * this.shake)
-        .addScaledVector(right, Math.sin(t * 47 + 1.3) * 0.5 * this.shake);
-    }
     this.world.rel(camAbs, this._tmp);
     this.rig.camera.position.copy(this._tmp);
 
@@ -1761,10 +1758,13 @@ export class FlightModel {
         // horizon (lower half)
         const moonDir3 = _oV.copy(this.moonC).sub(this.pos).normalize();
         lookDir.lerp(moonDir3, 0.3).normalize();
-        // tilt-down after the clouds: ~42% of the way to nadir by ~70 km —
-        // kept under 50% so the planet's limb stays in frame at the orbit
-        // cut (the user's "地球全体が見える" beat)
-        const tilt = 0.42 * smoothstep(12, 70, this.tAgl / 1000);
+        // tilt-down after the clouds: ~12% of the way to nadir by ~70 km —
+        // shallow enough that at the orbit cut the frame holds the moon
+        // (upper edge), the star field and the planet's limb+surface (lower
+        // half) TOGETHER — the user's "月がカメラに入りつつ地球全体が見える"
+        // beat — and the coast keeps the limb in view through the night-side
+        // crossing (no all-black frames)
+        const tilt = 0.12 * smoothstep(12, 70, this.tAgl / 1000);
         if (tilt > 0) {
           lookDir.lerp(_oV.copy(this.primC).sub(this.pos).normalize(), tilt).normalize();
         }
@@ -1775,9 +1775,13 @@ export class FlightModel {
       // ascent (the velocity bearing would swing ~90° at the cut); the
       // end look (nadir) is exactly the moon bearing at the TLI node.
       const p = clamp(this.orbT / Math.max(this.el.period, 1), 0, 1);
-      // k starts at 0.42 matching the ascent-end tilt (continuity), and eases
-      // to full nadir by ~half the lap, well before the TLI node
-      const k = 0.42 + 0.58 * smoothstep(0, 0.55, p);
+      // k starts at 0.12 matching the ascent-end tilt (continuity) and holds
+      // the limb view (limb + stars, calm at warp 200x — a nadir look
+      // strobes the surface at ~465 km per frame) through the mid-lap and
+      // the night-side crossing, then eases to full nadir by 85% of the lap
+      // so the TLI handoff (nadir = the moon bearing at the node) is
+      // seamless.
+      const k = 0.12 + 0.88 * smoothstep(0.55, 0.85, p);
       const mH = _oV.copy(this.moonC).sub(this.pos);
       mH.addScaledVector(up, -mH.dot(up));
       if (mH.lengthSq() > 1) {
