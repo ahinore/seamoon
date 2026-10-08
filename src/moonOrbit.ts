@@ -33,9 +33,23 @@ export function moonPositionAtAngle(a: number, out: THREE.Vector3): THREE.Vector
   return out.set(MOON_ORBIT_R * ca, MOON_ORBIT_R * sa * si, MOON_ORBIT_R * sa * ci);
 }
 
-/** Moon position (absolute) at simulation time `t` seconds. */
+/**
+ * M11w14: default phase offset for the live-clock placement. The old a=0
+ * start put the moon on the +X day side — from Earth that is a NEW moon, a
+ * nearly invisible dark disc (the user's "the moon looks dim from Earth").
+ * Anti-solar placement lights the Earth-facing hemisphere: at a=PI the
+ * sun-moon-Earth angle is ~25 deg, ~95% of the disc illuminated while the
+ * limb keeps a little shading relief. ?moonangle= and the mission demos
+ * (return=1 parks its own 235 deg) still override this.
+ */
+export const MOON_PHASE0 = Math.PI;
+
+/**
+ * Moon position (absolute) at simulation time `t` seconds.
+ * Phase 0 offset places the moon anti-solar at t=0 (bright from Earth).
+ */
 export function moonPosition(t: number, out: THREE.Vector3): THREE.Vector3 {
-  return moonPositionAtAngle(t * ANG_RATE, out);
+  return moonPositionAtAngle(MOON_PHASE0 + t * ANG_RATE, out);
 }
 
 const _mp = new THREE.Vector3();

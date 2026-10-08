@@ -725,16 +725,28 @@ export function makeMilkyWay(radius = 6e8): THREE.Mesh {
       }
       void main() {
         vec3 d = normalize(vDir);
-        float ang = asin(clamp(abs(dot(d, uBandN)), 0.0, 1.0));
-        // narrow core + wider halo (the band is not a gaussian strip)
-        float core = exp(-(ang * ang) / (0.055 * 0.055));
-        float halo = exp(-(ang * ang) / (0.16 * 0.16));
-        // mottled star-cloud structure along the band + dark dust rift
-        float cl = vnoise(d * 7.0) * 0.6 + vnoise(d * 17.0) * 0.4;
-        float dust = vnoise(d * 11.0 + vec3(4.7, 1.3, 8.9));
-        float rift = smoothstep(0.30, 0.55, dust) * core;
-        float glow = (core * (0.10 + 0.16 * cl) + halo * (0.03 + 0.05 * cl)) * (1.0 - 0.75 * rift);
-        vec3 col = mix(vec3(0.85, 0.90, 1.0), vec3(1.0, 0.95, 0.85), cl);
+        // band basis: t1/t2 span the galactic plane, w is the altitude
+        vec3 t1 = normalize(cross(uBandN, vec3(0.31, 0.11, 0.94)));
+        vec3 t2 = cross(uBandN, t1);
+        float u1 = dot(d, t1), u2 = dot(d, t2), w = dot(d, uBandN);
+        float ang = asin(clamp(abs(w), 0.0, 1.0));
+        // wide soft profile: broad halo with a gentle core, no hard strip
+        float core = exp(-(ang * ang) / (0.11 * 0.11));
+        float halo = exp(-(ang * ang) / (0.26 * 0.26));
+        // brightness runs along the band — one side is the bright bulge,
+        // the other fades toward the dim anticenter (real MW asymmetry)
+        float lon = atan(u2, u1);
+        float bulge = 0.45 + 0.55 * exp(-(pow(sin(lon - 0.9) * 0.5, 2.0)) * 1.2);
+        // star clouds stretched ALONG the band (slow along, fast across)
+        float cl = vnoise(vec3(u1 * 3.6, u2 * 3.6, w * 15.0)) * 0.65 +
+                   vnoise(vec3(u1 * 9.0, u2 * 9.0, w * 30.0)) * 0.35;
+        // dark dust lanes: soft irregular rift hugging the core
+        float dust = vnoise(vec3(u1 * 5.2, u2 * 5.2, w * 20.0) + vec3(4.7, 1.3, 8.9));
+        float rift = smoothstep(0.44, 0.66, dust) * core;
+        float glow = (core * (0.055 + 0.13 * cl) + halo * (0.018 + 0.045 * cl)) *
+                     bulge * (1.0 - 0.55 * rift);
+        // cool blue-white overall, warm slightly toward the bulge
+        vec3 col = mix(vec3(0.80, 0.88, 1.0), vec3(1.0, 0.93, 0.82), bulge * 0.5);
         gl_FragColor = vec4(col * glow, 1.0);
         #include <colorspace_fragment>
       }

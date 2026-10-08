@@ -21,6 +21,31 @@ function hash3(x: number, y: number, z: number, seed: number): number {
   return (h >>> 0) / 4294967295; // [0, 1)
 }
 
+/**
+ * M11w14: avalanche variant used by the moon's crater lattice.
+ *
+ * FNV-1a with a single trailing multiply is an AFFINE map over consecutive
+ * integer inputs — hash(i+1) − hash(i) is a near-constant 0.0039 — so
+ * neighbouring lattice cells got nearly identical randoms: equal-size
+ * craters lined up in bead-chain rows (the "too regular" look) and
+ * near-constant jitter. This finalizer (murmur-style xor-shift rounds)
+ * fully avalanches, breaking the neighbor correlation. Terrain noise keeps
+ * plain hash3 so existing terrain/mare values (and the landing regression
+ * baseline) stay byte-identical.
+ */
+export function hash3a(x: number, y: number, z: number, seed: number): number {
+  let h = (0x811c9dc5 ^ seed) | 0;
+  h = Math.imul(h ^ (x | 0), 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h ^ (y | 0), 0xc2b2ae35);
+  h ^= h >>> 16;
+  h = Math.imul(h ^ (z | 0), 0x27d4eb2f);
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x9e3779b1);
+  h ^= h >>> 13;
+  return (h >>> 0) / 4294967296; // [0, 1)
+}
+
 const smooth = (t: number): number => t * t * (3 - 2 * t);
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 

@@ -15,14 +15,16 @@ import type { BodySurface } from './tileGeometry';
  * to the attribute upload (~0.3 ms).
  *
  * Architecture:
- *  - `request()` enqueues a job; the pool keeps at most `maxInFlight`
- *    (default 4) running on ONE worker. Terrain build is pure CPU — one
- *    worker already saturates a core; more workers only add contention.
- *  - Results arrive tagged with the QNode that asked; if that node died or
- *    re-split meanwhile the tile goes to the LRU cache instead (it is fully
- *    built and may be re-requested soon).
+ *  - `request()` enqueues a job; the pool keeps at most `maxInFlight` jobs
+ *    per worker running across a small worker pool (M11w14: 3 workers —
+ *    the single-worker design left throughput on the floor once the moon
+ *    crater field got more expensive; tile builds are pure CPU and the
+ *    main thread stays idle during streaming). Results arrive tagged with
+ *    the QNode that asked; if that node died or re-split meanwhile the
+ *    tile goes to the LRU cache instead (it is fully built and may be
+ *    re-requested soon).
  *  - Node disposal does NOT cancel in-flight jobs (no protocol for it) —
- *    wasted work is bounded by maxInFlight and the result is cached anyway.
+ *    wasted work is bounded by maxInFlight × workers.
  *
  * Priority (strategy-note M10.1): the PlanetView queue is sorted by camera
  * distance BEFORE requests are issued, and `lookahead` (a unit velocity
@@ -41,8 +43,10 @@ interface Job {
 }
 
 export interface TilePoolOptions {
-  /** Parallel jobs allowed in flight (worker is single; queue depth). */
+  /** Parallel jobs allowed in flight PER WORKER. */
   maxInFlight?: number;
+  /** Worker count (M11w14: default 3 — was a single worker until now). */
+  workers?: number;
 }
 
 type Done = (tile: TileMesh) => void;
@@ -53,12 +57,13 @@ interface PendingDone {
 }
 
 export class TilePool {
-  private worker: Worker;
+  private workers: Worker[] = [];
+  private workerLoad: number[] = [];
   private inflight = new Map<number, { nodeKey: string; face: number; level: number; ix: number; iy: number; radius: number; res: number; bodyKey: string }>();
   private seq = 0;
   private waiting: { fn: Done; job: Job }[] = [];
   readonly maxInFlight: number;
-  /** Stats for the HUD: jobs finished on the worker. */
+  /** Stats for the HUD: jobs finished on the workers. */
   built = 0;
   // Last request's build parameters — onResult re-pumps with them so the
   // waiting queue drains even when NO new request() arrives this frame
@@ -71,9 +76,14 @@ export class TilePool {
 
   constructor(opts: TilePoolOptions = {}) {
     this.maxInFlight = opts.maxInFlight ?? 4;
-    // Vite resolves this to a bundled module worker.
-    this.worker = new Worker(new URL('./tileWorker.ts', import.meta.url), { type: 'module' });
-    this.worker.onmessage = (e: MessageEvent<WorkerResp>) => this.onResult(e.data);
+    const n = Math.max(1, opts.workers ?? 3);
+    for (let i = 0; i < n; i++) {
+      // Vite resolves this to a bundled module worker.
+      const w = new Worker(new URL('./tileWorker.ts', import.meta.url), { type: 'module' });
+      w.onmessage = (e: MessageEvent<WorkerResp>) => this.onResult(e.data, i);
+      this.workers.push(w);
+      this.workerLoad.push(0);
+    }
   }
 
   /**
@@ -104,7 +114,13 @@ export class TilePool {
   private dispatch(): void {
     const radius = this.lastRadius, res = this.lastRes;
     const material = this.lastMaterial!, bodyKey = this.lastBodyKey;
-    while (this.inflight.size < this.maxInFlight && this.waiting.length > 0) {
+    while (this.waiting.length > 0) {
+      // pick the worker with the most headroom (least-loaded first)
+      let wi = -1, best = this.maxInFlight;
+      for (let i = 0; i < this.workers.length; i++) {
+        if (this.workerLoad[i] < best) { best = this.workerLoad[i]; wi = i; }
+      }
+      if (wi < 0) return; // every worker at capacity
       const w = this.waiting.shift()!;
       const seq = ++this.seq;
       const j = w.job;
@@ -114,7 +130,8 @@ export class TilePool {
       });
       // Remember the completion closure for this seq.
       this.pendingDone.set(seq, { fn: w.fn, material });
-      this.worker.postMessage({
+      this.workerLoad[wi]++;
+      this.workers[wi].postMessage({
         seq, face: j.face, level: j.level, ix: j.ix, iy: j.iy,
         radius, res, body: bodyKey,
       });
@@ -123,7 +140,8 @@ export class TilePool {
 
   private pendingDone = new Map<number, PendingDone>();
 
-  private onResult(r: WorkerResp): void {
+  private onResult(r: WorkerResp, wi: number): void {
+    this.workerLoad[wi]--;
     const meta = this.inflight.get(r.seq);
     const done = this.pendingDone.get(r.seq);
     this.inflight.delete(r.seq);

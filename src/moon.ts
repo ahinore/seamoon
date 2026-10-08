@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { fbm3, ridged3, hash3i } from './noise';
+import { fbm3, ridged3, hash3i, hash3a } from './noise';
 
 /**
  * Moon terrain function (Phase 9) — the lunar counterpart of terrain.ts.
@@ -59,7 +59,7 @@ function craterProfile(s: number, radius: number, depth: number): number {
   const bowl = -depth * (1 - smoothstep(0.55, 0.95, r));
   const rim = depth * 0.4 * Math.exp(-Math.pow((r - 1.0) / 0.22, 2));
   let v = bowl + rim;
-  // central peak for complex craters (rad > 6 km)
+  // central peak for complex craters (rad > 6 km); sigma = 0.16·radius
   if (radius > 6000) v += depth * 0.22 * Math.exp(-Math.pow(r / 0.16, 2));
   return v;
 }
@@ -67,44 +67,108 @@ function craterProfile(s: number, radius: number, depth: number): number {
 /**
  * Craters from one lattice scale. Returns the summed elevation contribution.
  * cellM: lattice cell size (m). dScale: depth multiplier for this scale.
- * occupancy: P(cell hosts a crater) = 1 - occupancy threshold.
+ * occupancy: hash threshold — a cell hosts a crater when hash <= threshold.
+ *
+ * M11w14 de-latticing (the user read the old field as "too regular"):
+ *  - radius law flattened to pow(h,1.6): per-scale sizes spread wide.
+ *  - jitter amplitude 1.3 cell (±0.65 cell displacement): the nearest-
+ *    neighbor graph of the lattice breaks — no more visible rows.
+ *    Seam bound (per axis): a missed ring-2 center is ≥ 1.5 − jAmp/2 =
+ *    0.85 cells away from any sample while the profile support is at most
+ *    1.8·radC = 0.72 cells — continuous across loop edges.
+ *  - occupancy lowered (sparse fields) and modulated by a regional clump
+ *    mask: clusters + voids instead of an even sprinkle.
+ *  - 18% of occupied cells add a SECOND smaller crater anywhere in the
+ *    cell, killing the one-per-cell uniformity.
+ * (A first attempt used a flat ±0.45 jitter with a ±2 loop — correct but
+ * 4.6× the height-field cost; tile builds stalled the workers AND the
+ * inline-urgent main-thread budget at fps 9, so it was rolled back.)
  */
-function craterScale(
+export function craterScale(
   px: number, py: number, pz: number,
   cellM: number, dScale: number, occupy: number,
   spacing: number, seedBase: number,
 ): number {
+  // Regional density mask, anchored to super-blocks of the crater lattice
+  // (block ≈ 400 km via a per-scale bit shift, plus a 4x-finer medium
+  // layer). M11w14 lesson: the first version evaluated the cluster mask at
+  // the SAMPLE, so occupancy swayed with the sample position and whole
+  // craters popped in/out mid-cell — hard 100+ m steps in the height
+  // field. Anchoring the mask to the CELL makes occupancy sample-independent
+  // and the field continuous everywhere.
+  const sh = Math.max(1, Math.round(Math.log2(400000 / cellM)));
+  // occupancy sways ±0.22 around the base threshold
+  const occFor = (ix: number, iy: number, iz: number): number =>
+    occupy - (hash3a(ix >> sh, iy >> sh, iz >> sh, seedBase + 91) - 0.5) * 0.30 -
+    (hash3a(ix >> (sh - 2), iy >> (sh - 2), iz >> (sh - 2), seedBase + 92) - 0.5) * 0.14;
   const gx = Math.floor(px / cellM);
   const gy = Math.floor(py / cellM);
   const gz = Math.floor(pz / cellM);
+  // mesh can't resolve craters below ~3*spacing (LOD fade window)
+  const minRad = spacing > 0 ? 3 * spacing : 0;
   let sum = 0;
   for (let dz = -1; dz <= 1; dz++) {
     for (let dy = -1; dy <= 1; dy++) {
       for (let dx = -1; dx <= 1; dx++) {
         const ix = gx + dx, iy = gy + dy, iz = gz + dz;
-        if (hash3i(ix, iy, iz, seedBase) > occupy) continue;
-        const h2 = hash3i(ix, iy, iz, seedBase + 1);
-        const h3 = hash3i(ix, iy, iz, seedBase + 2);
-        // power-law-ish radius (squaring biases small), tied to the cell
-        const rad = cellM * 0.04 + h2 * h2 * cellM * 0.38;
-        // LOD: fade craters the mesh cannot resolve (~8 samples across)
-        const w = spacing > 0 ? smoothstep(3 * spacing, 8 * spacing, rad) : 1;
-        if (w <= 0) continue;
-        // jittered center (±0.15 cell), projected onto the sphere
-        const jx = (hash3i(ix, iy, iz, seedBase + 3) - 0.5) * 0.3 * cellM;
-        const jy = (hash3i(ix, iy, iz, seedBase + 4) - 0.5) * 0.3 * cellM;
-        const jz = (hash3i(ix, iy, iz, seedBase + 5) - 0.5) * 0.3 * cellM;
-        const cx = (ix + 0.5) * cellM + jx;
-        const cy = (iy + 0.5) * cellM + jy;
-        const cz = (iz + 0.5) * cellM + jz;
-        const invLen = R_M / Math.sqrt(cx * cx + cy * cy + cz * cz);
-        // chord distance on the sphere between sample dir and crater dir
-        const sx = px - cx * invLen;
-        const sy = py - cy * invLen;
-        const sz = pz - cz * invLen;
-        const s = Math.sqrt(sx * sx + sy * sy + sz * sz);
-        const depth = rad * (0.06 + 0.10 * h3) * dScale;
-        sum += craterProfile(s, rad, depth) * w;
+        // Poisson-like count per cell (M11w14): a cell holds 0..3 craters —
+        // empty cells and multi-crater cells both occur, so nearest-neighbor
+        // spacing varies from ~0 to ~1.5 cells. This (not jitter alone) is
+        // what finally erases the one-crater-per-cell lattice read. 12% of
+        // occupied cells hold 2-3 craters; the regional mask sways occEff so
+        // dense regions get more of the multi-crater cells.
+        const occEff = occFor(ix, iy, iz);
+        const h0 = hash3a(ix, iy, iz, seedBase);
+        if (h0 > occEff) continue;
+        const h2 = hash3a(ix, iy, iz, seedBase + 1);
+        const h3 = hash3a(ix, iy, iz, seedBase + 2);
+        const count = h0 > occEff ? 0 : h2 < 0.12 ? (h3 < 0.3 ? 3 : 2) : 1;
+        for (let k = 0; k < count; k++) {
+          // Size law skewed small-but-present: h^2.2 keeps many small + a
+          // solid tail of large in every neighborhood (a pure Pareto
+          // 0.03/sqrt(1-h) was tried and REJECTED — it starves the surface:
+          // E[rad²] dropped ~6x and most samples fell in no crater at all,
+          // leaving the terrain smooth/bare). Regional size factor: dense
+          // blocks skew smaller (secondary fields), sparse blocks bigger.
+          // The 0.40 cap is applied AFTER the factor so the seam bound
+          // (support 1.8·radC ≤ 0.72 cell < 1.0 cell) still holds.
+          const h2k = hash3a(ix, iy, iz, seedBase + 10 * k + 1);
+          const reg = occEff - occupy;
+          const radC = Math.min(0.40, (0.03 + 0.37 * Math.pow(h2k, 2.2)) * (1 - 1.2 * reg));
+          // center anywhere inside the cell (full-cell jitter): a ring-2
+          // center can then approach no closer than 1.0 cell while the
+          // profile support tops out at 1.8·radC = 0.72 cells — no
+          // discontinuity at the ±1 loop boundary.
+          const rad = radC * cellM;
+          if (rad <= minRad) continue;
+          const jx = hash3a(ix, iy, iz, seedBase + 10 * k + 3);
+          const jy = hash3a(ix, iy, iz, seedBase + 10 * k + 4);
+          const jz = hash3a(ix, iy, iz, seedBase + 10 * k + 5);
+          const bx = (ix + jx) * cellM;
+          const by = (iy + jy) * cellM;
+          const bz = (iz + jz) * cellM;
+          // everything inlined: this loop is the single hottest function in
+          // the sim (4 scales × 27 cells × 4225 verts per tile) — a
+          // helper-call version measured ~2 ms/tile of pure call overhead.
+          // bbox reject first (covers ~90% of cells) before any exp/sqrt.
+          // M11w14 critical fix: the centers used to be SPHERE-PROJECTED
+          // (bx·invLen) before the distance test, which shoved a center up
+          // to ~8 km tangentially (invLen−1 ≈ 0.46% at this radius) —
+          // far enough to leave its cell, so craters popped in/out at
+          // window shifts as hard 100+ m steps in the height field. The
+          // direct chord distance keeps every center inside its own cell,
+          // making the window math exact (and saves a sqrt per crater).
+          const rr = 1.8 * rad;
+          const dx1 = px - bx, dy1 = py - by, dz1 = pz - bz;
+          if (dx1 < rr && dx1 > -rr && dy1 < rr && dy1 > -rr && dz1 < rr && dz1 > -rr) {
+            const s = Math.sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1);
+            const w = spacing > 0 ? smoothstep(3 * spacing, 8 * spacing, rad) : 1;
+            if (w > 0) {
+              const depth = rad * (0.04 + 0.14 * hash3a(ix, iy, iz, seedBase + 10 * k + 2)) * dScale;
+              sum += craterProfile(s, rad, depth) * w;
+            }
+          }
+        }
       }
     }
   }
@@ -135,11 +199,12 @@ export function moonHeight(x: number, y: number, z: number, spacing = 0): number
   // crater scales: giant basins (not flattened by maria — they predate it)
   h += craterScale(px, py, pz, 140000, 0.45, 0.95, spacing, MOON_SEED + 400) *
        (1 - mareMask * 0.3);
-  // regolith-scale craters, partially drowned inside maria
+  // regolith-scale craters — sparse base rates (the regional block mask +
+  // multi-crater cells supply density variation), partially drowned in maria
   const craters =
-    craterScale(px, py, pz, 26000, 1.0, 0.55, spacing, MOON_SEED + 500) +
-    craterScale(px, py, pz, 5200, 0.55, 0.50, spacing, MOON_SEED + 600) +
-    craterScale(px, py, pz, 1000, 0.30, 0.45, spacing, MOON_SEED + 700);
+    craterScale(px, py, pz, 26000, 1.0, 0.42, spacing, MOON_SEED + 500) +
+    craterScale(px, py, pz, 5200, 0.55, 0.40, spacing, MOON_SEED + 600) +
+    craterScale(px, py, pz, 1000, 0.30, 0.38, spacing, MOON_SEED + 700);
   h += craters * (1 - mareMask * 0.8);
 
   return h;
