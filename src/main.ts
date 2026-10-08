@@ -398,7 +398,7 @@ function drawDirs(show: boolean): void {
   const aspect = rig.camera.aspect || 1;
   const cx = W / 2, cy = H / 2;
   const placed: { x: number; y: number }[] = [];
-  const arrow = (bodyAbs: THREE.Vector3, color: string, label: string) => {
+  const arrow = (bodyAbs: THREE.Vector3, color: string, label: string, bodyR: number) => {
     // body direction in camera space (-Z front, +X right, +Y up)
     _dirsD.copy(bodyAbs).sub(absCam).normalize().applyQuaternion(_dirsQ);
     const front = _dirsD.z < 0;
@@ -413,17 +413,39 @@ function drawDirs(show: boolean): void {
     }
     const l = Math.hypot(sx, sy);
     let px: number, py: number;
-    if (l < 0.15) {
-      // dead ahead / dead behind: no meaningful screen bearing — use fixed
-      // slots (ahead = bottom-center pointing up, behind = top-center
-      // pointing down) so the chevron never sits on the body itself
-      if (front) { px = cx; py = H - 84; sx = 0; sy = -1; }
-      else { px = cx; py = 84; sx = 0; sy = 1; }
+    let atBody = false; // body visible: chevron hugs its disc, pointing at it
+    if (front && l < 0.15) {
+      // dead ahead: no meaningful screen bearing — fixed bottom-center slot
+      // pointing up so the chevron never sits on the body itself
+      px = cx; py = H - 84; sx = 0; sy = -1;
+    } else if (!front && l < 0.15) {
+      // dead behind: fixed top-center slot pointing down
+      px = cx; py = 84; sx = 0; sy = 1;
+    } else if (front && Math.abs(sx) < 0.95 && Math.abs(sy) < 0.9 &&
+      (Math.tan(Math.asin(Math.min(1, bodyR / bodyAbs.distanceTo(absCam)))) / tf) * (H / 2) < 110) {
+      // body IS on screen (center inside the frustum, apparent disc small
+      // enough): park the chevron just outside its apparent radius along
+      // the center->body direction, rotated to point AT the body center —
+      // it marks the body without covering it, exactly where it is
+      const rpx = (Math.tan(Math.asin(Math.min(1, bodyR / bodyAbs.distanceTo(absCam)))) / tf) * (H / 2);
+      const nx = sx / l, ny = sy / l;
+      px = cx + (sx * W) / 2 + nx * (rpx + 26);
+      py = cy + (sy * H) / 2 + ny * (rpx + 26);
+      sx = nx; sy = ny;
+      atBody = true;
+      px = Math.min(Math.max(px, 44), W - 44);
+      py = Math.min(Math.max(py, 36), H - 150);
+      // keep the two arrows from stacking on each other
+      for (const p of placed) {
+        const d = Math.hypot(px - p.x, py - p.y);
+        if (d < 110) px += (px >= p.x ? 1 : -1) * (110 - d);
+      }
+      px = Math.min(Math.max(px, 30), W - 30);
+      placed.push({ x: px, y: py });
     } else {
-      // ALWAYS clamp to a border rectangle around the screen center along
-      // the shortest on-screen direction. The arrow is never drawn at the
-      // body's own position (it used to overlap the planet) and never
-      // disappears when the body leaves the screen.
+      // off-screen / behind / disc fills the view: clamp to a border
+      // rectangle around the screen center along the shortest on-screen
+      // direction — the arrow never disappears
       const nx = sx / l, ny = sy / l;
       const t = Math.min((W / 2 - 56) / Math.max(Math.abs(nx), 1e-6),
         (H / 2 - 100) / Math.max(Math.abs(ny), 1e-6));
@@ -441,7 +463,9 @@ function drawDirs(show: boolean): void {
       px = Math.min(Math.max(px, 30), W - 30);
       placed.push({ x: px, y: py });
     }
-    const ang = Math.atan2(sy, sx); // screen-space bearing (y grows down)
+    // screen-space bearing (y grows down); when hugging a visible body the
+    // chevron is flipped to point back at the body's center
+    const ang = Math.atan2(sy, sx) + (atBody ? Math.PI : 0);
     ctx.save();
     // dark halo so the chevron stays readable against a bright planet limb
     ctx.shadowColor = 'rgba(0,0,0,0.9)';
@@ -459,12 +483,12 @@ function drawDirs(show: boolean): void {
     ctx.textAlign = 'center';
     ctx.shadowColor = 'rgba(0,0,0,0.9)';
     ctx.shadowBlur = 4;
-    ctx.fillText(label, px, py + 21);
+    ctx.fillText(label, px, py + (atBody ? -12 : 21));
     ctx.shadowColor = 'transparent';
     ctx.shadowBlur = 0;
   };
-  arrow(_radarEarth, '#6fb5ff', 'Earth');
-  arrow(MOON.center, '#d0d0dc', 'Moon');
+  arrow(_radarEarth, '#6fb5ff', 'Earth', R);
+  arrow(MOON.center, '#d0d0dc', 'Moon', R_MOON);
 }
 
 function drawRadar(dt: number): void {
@@ -637,7 +661,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w17-arrowfix';
+const SIM_VERSION = 'sim v11.9w18-arrowhug';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
