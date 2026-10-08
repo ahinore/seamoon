@@ -298,26 +298,34 @@ const t0Sim = performance.now() / 1000;
 
 const hud = new Hud('hud');
 
-// M11w15 3D NAV MAP: replaces the M11w5 2D "sky-sphere projection" radar,
-// which the user found hard to read ("マップがわかりづらい"). A second small
-// WebGL scene draws Earth, the Moon on its true orbit ring, and the ship
-// with a ray along the camera's forward direction — true relative
-// POSITIONS (body radii exaggerated x15 so the spheres stay visible; the
-// geometry of the arrangement is untouched). The mini camera auto-frames
-// Earth+Moon+ship from a fixed tilted top-down direction, so the map reads
-// as "where am I between Earth and Moon, facing which way". Labels +
-// distances are drawn on a transparent 2D overlay canvas at the projected
-// screen positions. Same 40 km fade-in and ?radar=0 disable as before.
+// M11w16 NAV MAP v2 + HUD BEARING ARROWS: the user could not tell where
+// they were ("マップが動かない") because v1 auto-framed Earth+Moon+ship,
+// which renormalizes the layout and looks static. v2 is a ship-centered
+// TOP-DOWN plane map ("自分の上から見た平面"):
+//   - the ship is always at the panel center; Earth and Moon are drawn at
+//     their true planar offsets (world XZ, the ~orbital plane) so the dots
+//     visibly slide as you travel
+//   - screen up = the camera's forward direction projected on the map
+//     plane, so the map rotates as you turn and "what you face" is up
+//   - zoom keys to the FARTHER body (rmax = 0.85 x max(dE,dM), clamped):
+//     near a body its dot sits at the center under you and slides outward
+//     as you leave; the other body stays visible at the panel rim
+//   - radii still exaggerated x15 (capped to 45% of the panel so a close
+//     body does not swallow the map)
+// Plus a fullscreen HUD arrow layer (#dirs): a colored chevron + label for
+// Earth and Moon, placed at the body's on-screen direction when in view,
+// clamped to a screen-edge border when off-view or behind the camera.
 const mapDiv = document.getElementById('map3d') as HTMLDivElement | null;
 const mapCanvas = document.getElementById('map3dgl') as HTMLCanvasElement | null;
 const radarCanvas = document.getElementById('radar') as HTMLCanvasElement | null;
 const radarCtx = radarCanvas ? radarCanvas.getContext('2d') : null;
+const dirsCanvas = document.getElementById('dirs') as HTMLCanvasElement | null;
+const dirsCtx = dirsCanvas ? dirsCanvas.getContext('2d') : null;
 const radarEnabled = urlParams.get('radar') !== '0';
 let radarAcc = 1; // draw on the first frame
 const _radarEarth = new THREE.Vector3(0, 0, 0); // Earth center, absolute
 
 const MAP_S = 200; // css px square
-const MAP_DIR = new THREE.Vector3(0.55, 0.8, 0.35).normalize(); // fixed view direction
 const mapRenderer = mapCanvas && radarCtx
   ? new THREE.WebGLRenderer({ canvas: mapCanvas, alpha: true, antialias: true })
   : null;
@@ -328,11 +336,14 @@ let mapMoon: THREE.Mesh | null = null;
 let mapRing: THREE.LineLoop | null = null;
 let mapShip: THREE.Group | null = null;
 let mapShipRay: THREE.Line | null = null;
-const mapCAbs = new THREE.Vector3(0, 0, 1.2e8); // lerped framing centroid (absolute m)
-const mapCTAbs = new THREE.Vector3();           // 10 Hz framing target
-let mapU = 1 / 1.2e8;  // meters -> map units (lerped)
-let mapUT = mapU;      // target
+let mapU = 1 / 2.1e8;              // meters -> map units (lerped)
+let mapUT = mapU;                  // 10 Hz zoom target
+const mapUp = new THREE.Vector3(0, 0, -1); // persistent screen-up (world XZ)
+const _mapF = new THREE.Vector3();
+const _mapUp = new THREE.Vector3();
 const _mapV = new THREE.Vector3();
+const _dirsQ = new THREE.Quaternion();
+const _dirsD = new THREE.Vector3();
 
 if (mapRenderer) {
   mapRenderer.setSize(MAP_S, MAP_S, false); // CSS size comes from #map3d
@@ -341,7 +352,7 @@ if (mapRenderer) {
   mapScene = new THREE.Scene();
   mapCam = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
   const sun = new THREE.DirectionalLight(0xffffff, 1.1);
-  sun.position.copy(MAP_DIR);
+  sun.position.set(0.3, 1, 0.4); // near-vertical: the map is viewed top-down
   mapScene.add(sun, new THREE.AmbientLight(0xffffff, 0.5));
   const eMat = new THREE.MeshLambertMaterial(); eMat.color.setHex(0x4d8fdb);
   const mMat = new THREE.MeshLambertMaterial(); mMat.color.setHex(0xc9c9d6);
@@ -370,6 +381,68 @@ if (mapRenderer) {
   mapScene.add(mapShip);
 }
 
+// M11w16 fullscreen HUD bearing arrows (drawn under the map panel)
+function drawDirs(show: boolean): void {
+  if (!dirsCtx || !dirsCanvas) return;
+  if (!show) { dirsCanvas.style.display = 'none'; return; }
+  const W = window.innerWidth, H = window.innerHeight;
+  if (dirsCanvas.width !== W || dirsCanvas.height !== H) {
+    dirsCanvas.width = W; dirsCanvas.height = H;
+  }
+  dirsCanvas.style.display = 'block';
+  const ctx = dirsCtx;
+  ctx.clearRect(0, 0, W, H);
+  _dirsQ.copy(rig.camera.quaternion).invert();
+  const tf = Math.tan(rig.camera.fov * Math.PI / 360);
+  const aspect = rig.camera.aspect || 1;
+  const cx = W / 2, cy = H / 2;
+  const arrow = (bodyAbs: THREE.Vector3, color: string, label: string) => {
+    // body direction in camera space (-Z front, +X right, +Y up)
+    _dirsD.copy(bodyAbs).sub(absCam).normalize().applyQuaternion(_dirsQ);
+    let sx: number, sy: number, onScreen = false;
+    if (_dirsD.z < -0.001) {
+      sx = (_dirsD.x / -_dirsD.z) / (tf * aspect);
+      sy = (-_dirsD.y / -_dirsD.z) / tf;
+      onScreen = Math.abs(sx) < 0.88 && Math.abs(sy) < 0.82;
+    } else {
+      // behind the camera: the raw camera-space direction acts as a
+      // screen-space pointer (y flipped to the screen convention)
+      sx = _dirsD.x; sy = -_dirsD.y;
+      const l = Math.hypot(sx, sy);
+      if (l < 1e-6) { sx = 0; sy = 1; } else { sx /= l; sy /= l; }
+    }
+    let px: number, py: number;
+    if (onScreen) {
+      px = cx + (sx * W) / 2;
+      py = cy + (sy * H) / 2;
+    } else {
+      // clamp to a border rectangle around the screen center
+      const l = Math.hypot(sx, sy) || 1;
+      const nx = sx / l, ny = sy / l;
+      const t = Math.min((W / 2 - 52) / Math.max(Math.abs(nx), 1e-6),
+        (H / 2 - 42) / Math.max(Math.abs(ny), 1e-6));
+      px = cx + nx * t;
+      py = cy + ny * t;
+    }
+    const ang = Math.atan2(sy, sx); // screen-space bearing (y grows down)
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(ang);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(10, 0); ctx.lineTo(-6, 6); ctx.lineTo(-2, 0); ctx.lineTo(-6, -6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = color;
+    ctx.font = '10px ui-monospace,Consolas,monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, px, py + 21);
+  };
+  arrow(_radarEarth, '#6fb5ff', 'Earth');
+  arrow(MOON.center, '#d0d0dc', 'Moon');
+}
+
 function drawRadar(dt: number): void {
   if (!mapRenderer || !mapScene || !mapCam || !mapDiv || !mapShip || !mapEarth ||
       !mapMoon || !mapRing || !mapShipRay || !radarCtx || !radarCanvas || !radarEnabled) return;
@@ -378,34 +451,46 @@ function drawRadar(dt: number): void {
     : absCam.length() - R;
   const show = alt > 40000;
   mapDiv.style.display = show ? 'block' : 'none';
+  drawDirs(show);
   if (!show) return;
-  // 10 Hz: re-frame the mini camera around Earth + Moon + ship
+  // 10 Hz: re-zoom around the SHIP (the map is ship-centered)
   radarAcc += dt;
   if (radarAcc >= 0.1) {
     radarAcc = 0;
-    mapCTAbs.set(0, 0, 0).add(MOON.center).add(absCam).multiplyScalar(1 / 3);
-    const rmax = Math.max(mapCTAbs.length(), mapCTAbs.distanceTo(MOON.center),
-      mapCTAbs.distanceTo(absCam), 5e6);
-    mapUT = 1 / rmax; // bounding sphere maps to unit radius
+    const dE = absCam.length();
+    const dM = absCam.distanceTo(MOON.center);
+    // zoom keys to the farther body (held at the panel rim): near a body
+    // its dot starts at the center under you and slides outward as you
+    // leave, while the other body stays visible at the far edge
+    const rmax = THREE.MathUtils.clamp(0.85 * Math.max(dE, dM), 3e7, 3.5e8);
+    mapUT = 1 / rmax;
   }
-  // smooth the framing so warp bursts don't jump-cut the map
+  // smooth the zoom/rotation so warp bursts don't jump-cut the map
   const kf = 1 - Math.exp(-dt * 4);
   mapU += (mapUT - mapU) * kf;
-  mapCAbs.lerp(mapCTAbs, kf);
   const place = (obj: THREE.Object3D, abs: THREE.Vector3) =>
-    obj.position.copy(abs).sub(mapCAbs).multiplyScalar(mapU);
+    obj.position.copy(abs).sub(absCam).multiplyScalar(mapU);
+  mapShip.position.set(0, 0, 0); // ship always at the map center
   place(mapEarth, _radarEarth);
   place(mapMoon, MOON.center);
-  place(mapShip, absCam);
-  mapEarth.scale.setScalar(R * 15 * mapU);   // radii x15 so bodies stay visible
-  mapMoon.scale.setScalar(R_MOON * 15 * mapU);
+  mapEarth.scale.setScalar(Math.min(R * 15 * mapU, 0.45));  // radii x15, capped
+  mapMoon.scale.setScalar(Math.min(R_MOON * 15 * mapU, 0.45));
   mapRing.scale.setScalar(MOON_ORBIT_R * mapU);
   mapRing.position.copy(mapEarth.position);
   const marker = mapShip.children[0];
   if (marker) marker.scale.setScalar(0.05);   // map units: framed sphere is r=1
   mapShipRay.scale.setScalar(0.25);           // forward ray, map units
   mapShip.quaternion.copy(rig.camera.quaternion); // ray = camera forward
-  mapCam.position.copy(MAP_DIR).multiplyScalar(2.9); // fits r=1 at fov 45 with margin
+  // top-down: the mini camera sits directly above the ship looking down on
+  // the world XZ plane; screen up = camera forward projected on that plane,
+  // so the map rotates as you turn ("what you face" is always up)
+  _mapF.set(0, 0, -1).applyQuaternion(rig.camera.quaternion);
+  if (Math.hypot(_mapF.x, _mapF.z) > 0.05) {
+    _mapUp.set(_mapF.x, 0, _mapF.z).normalize();
+  }
+  mapUp.lerp(_mapUp, kf).normalize();
+  mapCam.position.set(0, 2.9, 0);
+  mapCam.up.copy(mapUp);
   mapCam.lookAt(0, 0, 0);
   mapRenderer.render(mapScene, mapCam);
   // label overlay: fixed slots + leader lines to the projected positions
@@ -413,12 +498,11 @@ function drawRadar(dt: number): void {
   const ctx = radarCtx;
   ctx.clearRect(0, 0, W, H);
   const proj = (abs: THREE.Vector3): [number, number] => {
-    _mapV.copy(abs).sub(mapCAbs).multiplyScalar(mapU).project(mapCam);
+    _mapV.copy(abs).sub(absCam).multiplyScalar(mapU).project(mapCam);
     return [(_mapV.x * 0.5 + 0.5) * W, (-_mapV.y * 0.5 + 0.5) * H];
   };
   const [ex, ey] = proj(_radarEarth);
   const [mx, my] = proj(MOON.center);
-  const [sx, sy] = proj(absCam);
   const distE = Math.max(absCam.length() - R, 0);
   const distM = Math.max(absCam.distanceTo(MOON.center) - R_MOON, 0);
   ctx.font = '9px ui-monospace,Consolas,monospace';
@@ -440,7 +524,7 @@ function drawRadar(dt: number): void {
   slot(6, 14, ex, ey, '#6fb5ff', 'Earth', fmtDist(distE));
   slot(6, H - 22, mx, my, '#d0d0dc', 'Moon', fmtDist(distM));
   ctx.fillStyle = '#ffd27f';
-  ctx.fillText('YOU', Math.min(Math.max(sx + 7, 4), W - 26), Math.min(Math.max(sy - 7, 10), H - 4));
+  ctx.fillText('YOU', W / 2 + 6, H / 2 - 6);
 }
 
 const absCam = new THREE.Vector3(0, 0, R * 4); // absolute camera position
@@ -529,7 +613,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w15-map3d';
+const SIM_VERSION = 'sim v11.9w16-navdir';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -896,7 +980,7 @@ for (let i = 0; i < speedup; i++) {
 
   renderer.render(scene, rig.camera);
   hud.frame(dt);
-  drawRadar(dt); // M11w15 3D nav map (Earth/Moon/ship, auto-framed, 10 Hz reframe)
+  drawRadar(dt); // M11w16 ship-centered 3D map + HUD bearing arrows
 
   // Probe access for tools/reentry.mjs: expose the flight model once it
   // exists (declared below this point in module scope).
