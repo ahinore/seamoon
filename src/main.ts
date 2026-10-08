@@ -398,9 +398,12 @@ function drawDirs(show: boolean): void {
   const aspect = rig.camera.aspect || 1;
   const cx = W / 2, cy = H / 2;
   const placed: { x: number; y: number }[] = [];
-  const arrow = (bodyAbs: THREE.Vector3, color: string, label: string, bodyR: number) => {
-    // body direction in camera space (-Z front, +X right, +Y up)
-    _dirsD.copy(bodyAbs).sub(absCam).normalize().applyQuaternion(_dirsQ);
+  // pass 1: project both bodies (camera space: -Z front, +X right, +Y up)
+  const bodies = [
+    { bodyAbs: _radarEarth, color: '#6fb5ff', label: 'Earth', bodyR: R },
+    { bodyAbs: MOON.center, color: '#d0d0dc', label: 'Moon', bodyR: R_MOON },
+  ].map((b) => {
+    _dirsD.copy(b.bodyAbs).sub(absCam).normalize().applyQuaternion(_dirsQ);
     const front = _dirsD.z < 0;
     let sx: number, sy: number;
     if (front) {
@@ -411,30 +414,48 @@ function drawDirs(show: boolean): void {
       // screen-space pointer (y flipped to the screen convention)
       sx = _dirsD.x; sy = -_dirsD.y;
     }
-    const l = Math.hypot(sx, sy);
+    const dist = b.bodyAbs.distanceTo(absCam);
+    return {
+      ...b, front, sx, sy, l: Math.hypot(sx, sy), dist, occluded: false, labelOff: 21,
+      rpx: (Math.tan(Math.asin(Math.min(1, b.bodyR / dist))) / tf) * (H / 2),
+      px0: cx + (sx * W) / 2, py0: cy + (sy * H) / 2,
+    };
+  });
+  // pass 2: place each chevron
+  _dirsPlaced.length = 0;
+  for (const b of bodies) {
+    const other = bodies[0] === b ? bodies[1] : bodies[0];
+    // a body hidden BEHIND the other body's disc (collinear view) must not
+    // hug there: its chevron would mark the wrong sphere — send it to the
+    // border instead so only the visible body gets the hug
+    const occluded = b.front && other.front && other.dist < b.dist
+      && Math.hypot(b.px0 - other.px0, b.py0 - other.py0) < other.rpx + 12;
     let px: number, py: number;
     let atBody = false; // body visible: chevron hugs its disc, pointing at it
-    if (front && l < 0.15) {
-      // dead ahead: no meaningful screen bearing — fixed bottom-center slot
-      // pointing up so the chevron never sits on the body itself
-      px = cx; py = H - 84; sx = 0; sy = -1;
-    } else if (!front && l < 0.15) {
-      // dead behind: fixed top-center slot pointing down
-      px = cx; py = 84; sx = 0; sy = 1;
-    } else if (front && Math.abs(sx) < 0.95 && Math.abs(sy) < 0.9 &&
-      (Math.tan(Math.asin(Math.min(1, bodyR / bodyAbs.distanceTo(absCam)))) / tf) * (H / 2) < 110) {
+    let flipped = false;
+    if (b.front && !occluded && Math.abs(b.sx) < 0.95 && Math.abs(b.sy) < 0.9 && b.rpx < 110) {
       // body IS on screen (center inside the frustum, apparent disc small
       // enough): park the chevron just outside its apparent radius along
       // the center->body direction, rotated to point AT the body center —
-      // it marks the body without covering it, exactly where it is
-      const rpx = (Math.tan(Math.asin(Math.min(1, bodyR / bodyAbs.distanceTo(absCam)))) / tf) * (H / 2);
-      const nx = sx / l, ny = sy / l;
-      px = cx + (sx * W) / 2 + nx * (rpx + 26);
-      py = cy + (sy * H) / 2 + ny * (rpx + 26);
-      sx = nx; sy = ny;
+      // it marks the body without covering it, exactly where it is.
+      // Near the view center the radial direction is ill-defined, so the
+      // chevron sits straight above the disc instead (stable, still hugs).
+      const nx = b.l > 0.15 ? b.sx / b.l : 0;
+      const ny = b.l > 0.15 ? b.sy / b.l : -1;
+      let px2 = cx + (b.sx * W) / 2 + nx * (b.rpx + 26);
+      let py2 = cy + (b.sy * H) / 2 + ny * (b.rpx + 26);
+      // if the hug spot falls off-screen or on the help bar, hug from the
+      // OPPOSITE side of the disc instead (always on-screen for a visible
+      // disc) — never drag the chevron away from the body
+      if (py2 > H - 150 || py2 < 36 || px2 < 44 || px2 > W - 44) {
+        px2 = cx + (b.sx * W) / 2 - nx * (b.rpx + 26);
+        py2 = cy + (b.sy * H) / 2 - ny * (b.rpx + 26);
+        flipped = true;
+      }
+      b.sx = nx; b.sy = ny;
       atBody = true;
-      px = Math.min(Math.max(px, 44), W - 44);
-      py = Math.min(Math.max(py, 36), H - 150);
+      px = Math.min(Math.max(px2, 30), W - 30);
+      py = Math.min(Math.max(py2, 30), H - 30);
       // keep the two arrows from stacking on each other
       for (const p of placed) {
         const d = Math.hypot(px - p.x, py - p.y);
@@ -442,16 +463,33 @@ function drawDirs(show: boolean): void {
       }
       px = Math.min(Math.max(px, 30), W - 30);
       placed.push({ x: px, y: py });
+      // label on the side of the chevron that faces AWAY from the disc
+      b.labelOff = Math.abs(ny) >= 0.3 ? (flipped ? -ny : ny) * 12 : -12;
+    } else if (!b.front && b.l < 0.15) {
+      // dead behind: fixed top-center slot pointing down
+      px = cx; py = 84; b.sx = 0; b.sy = 1;
+      b.labelOff = 21;
     } else {
-      // off-screen / behind / disc fills the view: clamp to a border
-      // rectangle around the screen center along the shortest on-screen
-      // direction — the arrow never disappears
-      const nx = sx / l, ny = sy / l;
+      // off-screen / behind / disc fills the view / occluded by the other
+      // body: clamp to a border rectangle around the screen center along
+      // the shortest on-screen direction — the arrow never disappears
+      const nx = b.sx / b.l, ny = b.sy / b.l;
       const t = Math.min((W / 2 - 56) / Math.max(Math.abs(nx), 1e-6),
         (H / 2 - 100) / Math.max(Math.abs(ny), 1e-6));
       px = cx + nx * t;
       py = cy + ny * t;
-      sx = nx; sy = ny;
+      b.sx = nx; b.sy = ny;
+      // an occluded body's border arrow must not touch the occluder's
+      // disc (it would look like it marks that sphere): slide it outward
+      // along the same bearing until it clears the disc
+      if (occluded) {
+        const ddx = px - other.px0, ddy = py - other.py0;
+        const dd = Math.hypot(ddx, ddy);
+        if (dd < other.rpx + 20) {
+          px = other.px0 + (ddx / (dd || 1)) * (other.rpx + 20);
+          py = other.py0 + (ddy / (dd || 1)) * (other.rpx + 20);
+        }
+      }
       // dodge the fixed panels: nav map (top-right), debug HUD (top-left)
       if (px > W - 240 && py < 240) px = W - 240;
       if (px < 540 && py < 290) px = 540;
@@ -462,34 +500,52 @@ function drawDirs(show: boolean): void {
       }
       px = Math.min(Math.max(px, 30), W - 30);
       placed.push({ x: px, y: py });
+      b.labelOff = 21;
     }
+    b.occluded = occluded;
+    _dirsPlaced.push({ ...b, px, py });
     // screen-space bearing (y grows down); when hugging a visible body the
-    // chevron is flipped to point back at the body's center
-    const ang = Math.atan2(sy, sx) + (atBody ? Math.PI : 0);
+    // chevron is flipped to point back at the body's center (from whichever
+    // side of the disc it hugs)
+    const ang = Math.atan2(b.sy, b.sx) + (atBody && !flipped ? Math.PI : 0);
     ctx.save();
     // dark halo so the chevron stays readable against a bright planet limb
     ctx.shadowColor = 'rgba(0,0,0,0.9)';
     ctx.shadowBlur = 4;
     ctx.translate(px, py);
     ctx.rotate(ang);
-    ctx.fillStyle = color;
+    ctx.fillStyle = b.color;
     ctx.beginPath();
     ctx.moveTo(10, 0); ctx.lineTo(-6, 6); ctx.lineTo(-2, 0); ctx.lineTo(-6, -6);
     ctx.closePath();
     ctx.fill();
     ctx.restore();
-    ctx.fillStyle = color;
+    ctx.fillStyle = b.color;
     ctx.font = '10px ui-monospace,Consolas,monospace';
     ctx.textAlign = 'center';
     ctx.shadowColor = 'rgba(0,0,0,0.9)';
     ctx.shadowBlur = 4;
-    ctx.fillText(label, px, py + (atBody ? -12 : 21));
+    ctx.fillText(b.label, px, py + (b.labelOff ?? (atBody ? -12 : 21)));
     ctx.shadowColor = 'transparent';
     ctx.shadowBlur = 0;
-  };
-  arrow(_radarEarth, '#6fb5ff', 'Earth', R);
-  arrow(MOON.center, '#d0d0dc', 'Moon', R_MOON);
+  }
+  if (urlParams.has('dirdbg')) {
+    // temporary: expose the arrow math for the moon vs the render camera
+    _dirsD.copy(MOON.center).sub(absCam).normalize().applyQuaternion(_dirsQ);
+    const mx = (_dirsD.x / -_dirsD.z) / (tf * aspect);
+    const my = (-_dirsD.y / -_dirsD.z) / tf;
+    (_dirsDbg ?? (_dirsDbg = []))[0] = `dirdbg moon d=(${_dirsD.x.toFixed(3)},${_dirsD.y.toFixed(3)},${_dirsD.z.toFixed(3)}) ndc=(${mx.toFixed(3)},${my.toFixed(3)}) camQ=(${rig.camera.quaternion.x.toFixed(3)},${rig.camera.quaternion.y.toFixed(3)},${rig.camera.quaternion.z.toFixed(3)},${rig.camera.quaternion.w.toFixed(3)}) absCam=(${absCam.x.toFixed(0)},${absCam.y.toFixed(0)},${absCam.z.toFixed(0)}) moonAbs=(${MOON.center.x.toFixed(0)},${MOON.center.y.toFixed(0)},${MOON.center.z.toFixed(0)})`;
+    (_dirsDbg ?? (_dirsDbg = []))[1] = `dirdbg placed ${_dirsPlaced.map((p) => `${p.label}@(${p.px.toFixed(0)},${p.py.toFixed(0)}) proj=(${p.px0.toFixed(0)},${p.py0.toFixed(0)}) s=(${p.sx.toFixed(3)},${p.sy.toFixed(3)}) rpx=${p.rpx.toFixed(0)} occl=${p.occluded}`).join(' | ')}`;
+  }
 }
+
+let _dirsDbg: string[] | null = null;
+type DirPlaced = {
+  label: string; px: number; py: number; px0: number; py0: number;
+  sx: number; sy: number; rpx: number; occluded: boolean;
+};
+let _dirsPlaced: DirPlaced[] = [];
+export function dirsDebugLines(): string[] | null { return _dirsDbg; }
 
 function drawRadar(dt: number): void {
   if (!mapRenderer || !mapScene || !mapCam || !mapDiv || !mapShip || !mapEarth ||
@@ -661,7 +717,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w18-arrowhug';
+const SIM_VERSION = 'sim v11.9w19-arrowoccl';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -1065,6 +1121,7 @@ for (let i = 0; i < speedup; i++) {
     : Math.max(absCam.length() - R, 0);
   const look = rig.getLookAngles();
   const moonDist = MOON.center.length() - R_MOON;
+  const dbg = dirsDebugLines();
   hud.update([
     ...errors.slice(-3),
     SIM_VERSION,
@@ -1074,6 +1131,7 @@ for (let i = 0; i < speedup; i++) {
     ...(speedup > 1 ? [`speedup x${speedup}`] : []),
     ...(rebased > 0 ? [`rebase x${rebased} (total ${world.rebaseCount})`] : []),
     ...(probe ? [`probe ${probe()}`] : []),
+    ...(dbg ?? []),
     `alt ${fmtDist(alt)} (${nearBody})  speed ${fmtDist(rig.stickMode && !flight.frozen ? flight.tGs : rig.currentSpeed)}/s  x${rig.speedMultiplier}`,
     `moon dist ${fmtDist(moonDist)}  tiles ${moonView.stats.visibleTiles} L${moonView.stats.maxVisibleLevel}`,
     `pitch ${look.pitch.toFixed(1)}°  bank ${look.bank.toFixed(1)}°  hdg ${look.heading.toFixed(0)}°  level ${rig.autoLevel ? 'on(R)' : 'off(R)'}`,
