@@ -70,20 +70,31 @@ interface TourKey {
  * above. K4 is the verified image-4 site (lat 44, lon 52: Earth ~25 deg up
  * at rig-heading 118) reached by a slow 60 s descent. */
 const TOUR: TourKey[] = [
+  // K0 beach — hold 3 s (M11w20h: was 18, user wants launch ~3 s in).
   { body: 'earth', latDeg: 5.45, lonDeg: 20.75, altM: 45.9, agl: false,
-    pitchDeg: 0.7, hdgDeg: 255, moonDeg: 0, holdS: 18, travelS: 0,
+    pitchDeg: 0.7, hdgDeg: 255, moonDeg: 0, holdS: 3, travelS: 0,
+    levelView: true },
+  // K0b low-orbit step (M11w20h, hold 0): drifts ~100 km BACKWARD (bearing
+  // ~105, behind the K0 camera) while rising to 260 km with pitch only -12,
+  // so the horizon stays high in frame through the whole climb — user asked
+  // for a 30 s beach->space ascent that drifts back and keeps the horizon
+  // in view. K0->K0b 12 s + K0b->K1 18 s = 30 s total.
+  { body: 'earth', latDeg: 5.2, lonDeg: 21.6, altM: 260_000, agl: false,
+    pitchDeg: -12, hdgDeg: 255, moonDeg: 0, holdS: 0, travelS: 12,
     levelView: true },
   { body: 'earth', latDeg: 15.8, lonDeg: 19.3, altM: 11_690_000, agl: false,
-    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 3, travelS: 40 },
+    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 3, travelS: 18 },
   // K1b departure high point (M11w20e, hold 0): the straight K1->K2 chord
   // dips to ~1.1 Mm above Earth, where the planet's disc (59 deg) swallows
   // the moon — the locked-on view would stare at Earth's surface instead of
   // the moon it is tracking. Climbing to 13.6 Mm first keeps every chord
   // >7.5 Mm above Earth so the tracked moon NEVER drops behind the planet.
-  // Moon angle held at 230 here (no sweep) — the 230->540 orbit sweep
-  // happens on the next leg while the camera rides the moon.
+  // M11w20h: this leg now also carries the whole 230->540 moon orbit sweep
+  // (full-leg smoothstep, ~8 deg/s avg) so the APPROACH leg K1b->K2 has a
+  // completely static moon — the tracked camera no longer yaws after a
+  // moving moon (user: "the moon seems to slide sideways when nearing it").
   { body: 'earth', latDeg: 26.9, lonDeg: 38.0, altM: 13_600_000, agl: false,
-    pitchDeg: -64, hdgDeg: 0, moonDeg: 230, holdS: 0, travelS: 30,
+    pitchDeg: -64, hdgDeg: 0, moonDeg: 540, holdS: 0, travelS: 40,
     lookAtMoon: true, lookAtRamp: 0.15 },
   { body: 'moon', latDeg: 0, lonDeg: 52, altM: 2_760_000, agl: false,
     pitchDeg: -89, hdgDeg: 0, moonDeg: 540, holdS: 3, travelS: 36,
@@ -92,8 +103,10 @@ const TOUR: TourKey[] = [
   // side limb instead of cutting straight across — the "swing around"
   // segment of the choreography. Both chords of the bend stay >100 km above
   // the sphere, so nothing passes through the moon.
+  // M11w20h: descent from moon arrival to touchdown compressed to ~10 s of
+  // motion (2 + 3 + 1 + 6) per user — was 18 + 20 + 8-hold + 60.
   { body: 'moon', latDeg: 0, lonDeg: 100, altM: 2_000_000, agl: false,
-    pitchDeg: -70, hdgDeg: 0, moonDeg: 540, holdS: 0, travelS: 18 },
+    pitchDeg: -70, hdgDeg: 0, moonDeg: 540, holdS: 0, travelS: 2 },
   // K3 surface + distant Earth in ONE frame: from 100 km up the horizon dips
   // only ~19 deg, so the limb sits low in frame while the Earth (32 deg up
   // here) rides above it — at higher altitude the two are ~100 deg apart and
@@ -103,10 +116,10 @@ const TOUR: TourKey[] = [
   // (With the M11w20c sun the Earth shows ~45% lit from the moon — half a
   // globe, terminator visible.)
   { body: 'moon', latDeg: 30, lonDeg: 52, altM: 100_000, agl: false,
-    pitchDeg: 7, hdgDeg: -70, moonDeg: 540, holdS: 8, travelS: 20,
+    pitchDeg: 7, hdgDeg: -70, moonDeg: 540, holdS: 1, travelS: 3,
     levelView: true },
   { body: 'moon', latDeg: 44, lonDeg: 52, altM: 2770.8, agl: false,
-    pitchDeg: 8.1, hdgDeg: -68, moonDeg: 540, holdS: Infinity, travelS: 60,
+    pitchDeg: 8.1, hdgDeg: -68, moonDeg: 540, holdS: Infinity, travelS: 6,
     levelView: true },
 ];
 
@@ -130,20 +143,27 @@ const TOUR: TourKey[] = [
  *                                       (floating-origin stress: the camera
  *                                       crosses rebase thresholds sideways)
  *   ?demo=tour                          M11w20 guided flythrough of the user's
- *                                       choreography: beach start -> whole
- *                                       Earth 11.69 Mm with the distant moon
- *                                       above the limb -> departure high point
- *                                       13.6 Mm (M11w20e, keeps the moon
- *                                       unoccluded) -> whole moon in frame
- *                                       2.76 Mm -> swing around the moon to a
- *                                       horizon view with the surface and the
- *                                       distant Earth -> slow landing at
- *                                       2770.8 m with the Earth in the sky.
+ *                                       choreography: beach start (3 s hold)
+ *                                       -> backward-drifting low-orbit step
+ *                                       260 km with the horizon in view
+ *                                       (M11w20h) -> whole Earth 11.69 Mm
+ *                                       with the distant moon above the limb
+ *                                       -> departure high point 13.6 Mm
+ *                                       (M11w20e, keeps the moon unoccluded;
+ *                                       M11w20h: this leg also carries the
+ *                                       230->540 moon orbit sweep so the
+ *                                       approach sees a static moon) -> whole
+ *                                       moon in frame 2.76 Mm -> swing around
+ *                                       the moon to a horizon view with the
+ *                                       surface and the distant Earth ->
+ *                                       landing at 2770.8 m with the Earth in
+ *                                       the sky (descent compressed to ~10 s
+ *                                       of motion, M11w20h).
  *                                       Smoothstep position lines + slerped
  *                                       orientation; the frozen moon angle
- *                                       completes its tween in the first 60%
- *                                       of each leg (approaches converge on a
- *                                       static moon — no pass-through).
+ *                                       tweens across the FULL leg with
+ *                                       smoothstep pacing (zero rate at both
+ *                                       ends — no pass-through).
  *                                       Overrides per key i: tourp<i> tourh<i>
  *                                       (URL-convention pitch/hdg) and
  *                                       tourm<i> (moon angle); touro=N starts
@@ -281,6 +301,7 @@ export class AutoPilot {
       ov('pitchDeg', 'tourp4'); ov('hdgDeg', 'tourh4'); ov('moonDeg', 'tourm4');
       ov('pitchDeg', 'tourp5'); ov('hdgDeg', 'tourh5'); ov('moonDeg', 'tourm5');
       ov('pitchDeg', 'tourp6'); ov('hdgDeg', 'tourh6'); ov('moonDeg', 'tourm6');
+      ov('pitchDeg', 'tourp7'); ov('hdgDeg', 'tourh7'); ov('moonDeg', 'tourm7');
       this.tourK = tk;
       const skip = Math.min(Math.max(num(q, 'touro', 0), 0), tk.length - 1);
       for (let i = 0; i <= skip; i++) {
@@ -622,7 +643,11 @@ export class AutoPilot {
       // far away (e.g. leaving Earth) the moon settles at its keyframe
       // position, and the final approach converges on a STATIC moon — the
       // straight-line path can never sweep through the moving sphere.
-      const me = Math.min(1, e / 0.6);
+      // M11w20h: the moon angle tween spans the WHOLE leg (me = e) — its
+      // smoothstep pacing starts and ends at zero rate, so sweeps read as
+      // smooth cinematic pans, and the tour's only moon-sweeping leg
+      // (K1->K1b) finishes its 230->540 sweep before the approach begins.
+      const me = e;
       this.moonAngle = this.tourFromMoon + (this.tourToMoon - this.tourFromMoon) * me;
       if (s < 1) {
         return `autopilot:tour ${this.tourIdx + 1}/${this.tourK.length} travel ${(s * 100).toFixed(0)}%`;
