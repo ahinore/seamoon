@@ -74,7 +74,7 @@ const TOUR: TourKey[] = [
     pitchDeg: 0.7, hdgDeg: 255, moonDeg: 0, holdS: 18, travelS: 0,
     levelView: true },
   { body: 'earth', latDeg: 15.8, lonDeg: 19.3, altM: 11_690_000, agl: false,
-    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 3, travelS: 12 },
+    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 3, travelS: 40 },
   // K1b departure high point (M11w20e, hold 0): the straight K1->K2 chord
   // dips to ~1.1 Mm above Earth, where the planet's disc (59 deg) swallows
   // the moon — the locked-on view would stare at Earth's surface instead of
@@ -608,6 +608,13 @@ export class AutoPilot {
         _trackQ.setFromRotationMatrix(_lookM);
         const w = Math.min(1, e / (this.tourK[this.tourIdx].lookAtRamp ?? 0.01));
         rig.camera.quaternion.slerpQuaternions(this.tourFromQ, _trackQ, w);
+        // M11w20g: at arrival replace the keyframe's Euler pose with the
+        // final tracked orientation — the hold (even holdS 0) and the next
+        // leg's tourFromQ then continue from EXACTLY where the tracking
+        // ended. Without this the hold snapped to the keyframe pose (K1b's
+        // pitch -64/hdg 0 sits 49 deg off the tracked moon direction), a
+        // single-frame 49 deg jump, and the next leg re-swung back.
+        if (s >= 1) this.tourQ[this.tourIdx].copy(_trackQ);
       } else {
         rig.camera.quaternion.slerpQuaternions(this.tourFromQ, this.tourQ[this.tourIdx], e);
       }

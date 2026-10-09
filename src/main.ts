@@ -34,6 +34,14 @@ console.error = (...args: unknown[]) => {
 
 const urlParams = new URLSearchParams(location.search);
 
+// M11w20g: per-frame camera pose log (?camlog=1) — absolute position +
+// world quaternion + autopilot status each rendered frame, exposed as
+// window.__camLog for jump/teleport analysis (e.g. tour hold->travel).
+const CAMLOG = urlParams.get('camlog') === '1';
+if (CAMLOG) {
+  (window as any).__camLog = [];
+}
+
 const renderer = new THREE.WebGLRenderer({
   // MSAA switchable from URL for A/B diagnosis (?aa=0).
   antialias: urlParams.get('aa') !== '0',
@@ -728,7 +736,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w20-tour8';
+const SIM_VERSION = 'sim v11.9w20-tour9';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -959,6 +967,17 @@ for (let i = 0; i < speedup; i++) {
     rig.update(dt);
     autoLine = auto.update(rig, dt);
     world.abs(rig.camera.position, absCam);
+    if (CAMLOG) {
+      const log = (window as any).__camLog as Record<string, unknown>[];
+      const cq = rig.camera.quaternion;
+      log.push({
+        t: performance.now(),
+        x: absCam.x, y: absCam.y, z: absCam.z,
+        qx: cq.x, qy: cq.y, qz: cq.z, qw: cq.w,
+        s: autoLine ?? '',
+      });
+      if (log.length > 60000) log.shift();
+    }
   }
 
   // Floating-origin rebase: recenters the frame origin onto the camera.
