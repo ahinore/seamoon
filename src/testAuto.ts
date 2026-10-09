@@ -9,6 +9,54 @@ const PLANET_R = EARTH.radius;
 const R_MOON = MOON.radius;
 const DEG = Math.PI / 180;
 
+/** One stop of the M11w20 tour (?demo=tour). Orientation uses the SAME URL
+ * conventions as the hover spawn (?pitch: -90 = level horizon, ?hdg: spin
+ * around the local zenith) so every keyframe is a verifiable hover pose. */
+interface TourKey {
+  body: 'earth' | 'moon';
+  latDeg: number;
+  lonDeg: number;
+  /** Altitude above the sphere, m (the moon adds the terrain lift like the
+   * hover spawn does; Earth only lifts when agl is set). */
+  altM: number;
+  agl: boolean;
+  pitchDeg: number;
+  hdgDeg: number;
+  /** Frozen moon orbit angle (deg) while this keyframe is active. */
+  moonDeg: number;
+  /** Level-camera construction (views above the horizon): pitchDeg is the
+   * view elevation above the horizon and hdgDeg spins it from the up x east
+   * reference, with a level up vector (the tilt+spin path gains bank once
+   * the tilt passes 90 deg). */
+  levelView?: boolean;
+  /** Seconds to hold at arrival. */
+  holdS: number;
+  /** Seconds of travel from the previous keyframe. */
+  travelS: number;
+}
+
+/** The user's reference screenshots (M11w20 request): start on the beach
+ * (image 1), pass the Earth-from-space pose (images 2-3, the same waypoint
+ * captured twice), finish hovering the moon surface (image 4). Numbers are
+ * read off the screenshots' HUD lines. K0 is a terrain-scan beach (low sand,
+ * trees left, water ahead-right — the default spawn sits 900 m inland so it
+ * cannot reproduce image 1); its HUD heading differs from the screenshot's
+ * 188 deg because the user's exact beach spot is unknown — the COMPOSITION
+ * (sand, trees, ocean, clouds) is what is matched. The K1 moon angle 230 deg
+ * puts the moon just above the Earth's limb, left of up-screen, matching
+ * image 2; K2 sits where the Earth shows ~25 deg up at rig-heading 118 with
+ * the moon frozen at 180 deg (scan: lat 44, lon 52). */
+const TOUR: TourKey[] = [
+  { body: 'earth', latDeg: 5.45, lonDeg: 20.75, altM: 45.9, agl: false,
+    pitchDeg: 0.7, hdgDeg: 255, moonDeg: 0, holdS: 18, travelS: 0,
+    levelView: true },
+  { body: 'earth', latDeg: 15.8, lonDeg: 19.3, altM: 11_690_000, agl: false,
+    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 8, travelS: 26 },
+  { body: 'moon', latDeg: 44, lonDeg: 52, altM: 2770.8, agl: false,
+    pitchDeg: 8.1, hdgDeg: -68, moonDeg: 180, holdS: Infinity, travelS: 70,
+    levelView: true },
+];
+
 /**
  * Test instrumentation for verifying milestones without manual input.
  * All positions are handled in ABSOLUTE coordinates; the autopilot writes
@@ -28,6 +76,17 @@ const DEG = Math.PI / 180;
  *   ?demo=orbit&alt=200000&span=deg     lateral arc flight at fixed altitude
  *                                       (floating-origin stress: the camera
  *                                       crosses rebase thresholds sideways)
+ *   ?demo=tour                          M11w20 guided flythrough of the user's
+ *                                       four reference screenshots: beach start
+ *                                       -> Earth from 11.69 Mm (moon above the
+ *                                       limb) -> moon surface 2770.8 m (Earth
+ *                                       in the sky). Smoothstep position lines
+ *                                       + slerped orientation; the frozen moon
+ *                                       angle tweens between keyframe values.
+ *                                       Overrides: tourp0/1/2 tourh0/1/2
+ *                                       (URL-convention pitch/hdg per key),
+ *                                       tourm1/2 (moon angle), touro=N (start
+ *                                       at keyframe N, skipping travel).
  * The autopilot only moves the camera; LOD behavior stays production code.
  */
 export class AutoPilot {
@@ -48,13 +107,27 @@ export class AutoPilot {
   private h0 = 0;
   private orbitAngle = 0;
   private readonly world: WorldOrigin;
+  /** Frozen moon orbit angle (rad) from ?moonangle, or null = live orbit.
+   * The tour OWNS this value too: it tweens between keyframe angles. */
+  moonAngle: number | null;
+  // M11w20 tour state (keyframes with URL overrides resolved).
+  private tourK: TourKey[] = [];
+  private readonly tourPos: THREE.Vector3[] = [];
+  private readonly tourQ: THREE.Quaternion[] = [];
+  private tourIdx = 0;
+  private tourHold = 0;
+  private tourTraveling = false;
+  private tourT = 0;
+  private tourDur = 1;
+  private tourFromMoon = 0;
+  private tourToMoon = 0;
+  private readonly tourFromPos = new THREE.Vector3();
+  private readonly tourFromQ = new THREE.Quaternion();
   // Session spawn pose (absolute), captured after the constructor places the
   // camera — H ("home") restores exactly this spot and nadir orientation,
   // through any number of floating-origin rebases (stored absolute).
   private readonly homePos = new THREE.Vector3();
   private readonly homeQ = new THREE.Quaternion();
-  /** Frozen moon orbit angle (rad) from ?moonangle, or null = live orbit. */
-  readonly moonAngle: number | null;
 
   constructor(rig: CameraRig, world: WorldOrigin) {
     const q = new URLSearchParams(location.search);
@@ -104,6 +177,34 @@ export class AutoPilot {
     // ?moonangle=<deg> freezes the moon at an orbit angle (testing): the
     // main loop skips its time-based update when this is present.
     this.moonAngle = q.has('moonangle') ? num(q, 'moonangle', 0) * DEG : null;
+
+    // M11w20: ?demo=tour — the guided flythrough of the user's reference
+    // screenshots (beach -> Earth from 11.69 Mm -> moon surface). Keyframe
+    // pose/heading/moon-angle overrides come from the URL so each stop can
+    // be tuned against its screenshot without touching the source; touro=N
+    // starts the tour at keyframe N (skipping earlier travel).
+    if (this.mode === 'tour') {
+      const tk = TOUR.map(k => ({ ...k }));
+      const ov = (key: keyof TourKey, param: string): void => {
+        const v = q.get(param);
+        if (v !== null && Number.isFinite(Number(v))) {
+          (tk[Number(param.slice(-1))] as unknown as Record<string, number>)[key] =
+            Number(v);
+        }
+      };
+      ov('pitchDeg', 'tourp0'); ov('hdgDeg', 'tourh0');
+      ov('pitchDeg', 'tourp1'); ov('hdgDeg', 'tourh1'); ov('moonDeg', 'tourm1');
+      ov('pitchDeg', 'tourp2'); ov('hdgDeg', 'tourh2'); ov('moonDeg', 'tourm2');
+      this.tourK = tk;
+      const skip = Math.min(Math.max(num(q, 'touro', 0), 0), tk.length - 1);
+      for (let i = 0; i <= skip; i++) {
+        this.moonAngle = tk[i].moonDeg * DEG;
+        this.tourPlace(rig, i);
+      }
+      this.tourIdx = skip;
+      this.tourHold = tk[skip].holdS;
+      return;
+    }
 
     // ?body=moon relocates the spawn to lunar orbit (M9.2 test hook):
     // hover over the moon's surface at ?alt, nadir view, moon frozen at
@@ -304,7 +405,130 @@ export class AutoPilot {
       }
       return `autopilot:look E return pitch=${p1} bank=${b1} hdg=${h1}`;
     }
+    if (this.mode === 'tour') return this.tourUpdate(rig, dt);
     return `autopilot:${this.mode} (unknown)`;
+  }
+
+  /** Compute a tour keyframe pose (absolute position + orientation), using
+   * the exact hover-spawn math so a keyframe is bit-identical to the
+   * equivalent ?demo=hover URL pose. Leaves the world origin at (0,0,0) and
+   * the camera AT the pose — callers either keep that state (constructor)
+   * or restore the previous camera state (tourStart). */
+  private computePose(rig: CameraRig, k: TourKey, outPos: THREE.Vector3, outQ: THREE.Quaternion): void {
+    const isMoon = k.body === 'moon';
+    const body = isMoon ? MOON : EARTH;
+    // The moon keyframes pin the orbit angle: swap the frozen center in for
+    // the placement (the live MOON.center is mid-tween during travel) and
+    // restore it afterwards. The main loop rewrites it every frame anyway.
+    const saveCenter = _tA.copy(MOON.center);
+    if (isMoon) moonPositionAtAngle(k.moonDeg * DEG, MOON.center);
+    const center = _tB.copy(body.center);
+    let alt = k.altM;
+    if (k.agl && !isMoon) {
+      const dir = localToAbsolute(EARTH, k.latDeg, k.lonDeg, 1, _tC).normalize();
+      alt = Math.max(k.altM + terrainHeight(dir.x, dir.y, dir.z), 2);
+    }
+    const pos = localToAbsolute(body, k.latDeg, k.lonDeg, alt, _tC).clone();
+    if (isMoon) {
+      // Same above-the-terrain lift as the hover spawn (a sphere-relative
+      // alt can bury the camera in a mountain — M11n9h).
+      const dir = pos.clone().sub(center).normalize();
+      pos.addScaledVector(dir, MOON.height(dir.x, dir.y, dir.z, 0) + 2);
+    }
+    if (isMoon) MOON.center.copy(saveCenter);
+    this.world.origin.set(0, 0, 0);
+    rig.camera.position.copy(pos);
+    rig.camera.up.set(0, 1, 0);
+    if (k.levelView) {
+      // Level-camera orientation for views ABOVE the horizon (K2): the
+      // tilt+spin composition rolls the camera once the tilt passes 90 deg
+      // (first verification showed bank 148 deg). Build the orientation from
+      // the desired view direction — elevation = pitchDeg above the horizon,
+      // bearing = the up x east reference spun by hdgDeg, the SAME bearing
+      // convention the tilt+spin path produces (HUD heading = bearing+180) —
+      // with a level up vector.
+      const upL = pos.clone().sub(center).normalize();
+      const east = eastAt(k.latDeg, k.lonDeg, _east).clone();
+      const fwd = upL.clone().cross(east).normalize()
+        .applyQuaternion(_qt.setFromAxisAngle(upL, -k.hdgDeg * DEG))
+        .multiplyScalar(Math.cos(k.pitchDeg * DEG))
+        .addScaledVector(upL, Math.sin(k.pitchDeg * DEG))
+        .normalize();
+      const upV = upL.clone().addScaledVector(fwd, -upL.dot(fwd)).normalize();
+      rig.camera.quaternion.setFromRotationMatrix(
+        new THREE.Matrix4().lookAt(ORIGIN, fwd, upV));
+    } else {
+      rig.camera.lookAt(center);
+      const east = eastAt(k.latDeg, k.lonDeg, _east);
+      if (k.pitchDeg !== -90) {
+        rig.camera.quaternion.premultiply(_qt.setFromAxisAngle(east, (k.pitchDeg + 90) * DEG));
+      }
+      if (k.hdgDeg !== 0) {
+        // Scratch vector — pos itself must stay intact (it is the pose output).
+        const up = _tC.copy(pos).sub(center).normalize();
+        rig.camera.quaternion.premultiply(_qt.setFromAxisAngle(up, -k.hdgDeg * DEG));
+      }
+    }
+    outPos.copy(pos);
+    outQ.copy(rig.camera.quaternion);
+  }
+
+  /** Compute and cache keyframe i's pose, leaving the camera there. */
+  private tourPlace(rig: CameraRig, i: number): void {
+    const pos = new THREE.Vector3();
+    const qq = new THREE.Quaternion();
+    this.computePose(rig, this.tourK[i], pos, qq);
+    this.tourPos[i] = pos;
+    this.tourQ[i] = qq;
+  }
+
+  /** Begin travel from the current camera state to keyframe i. */
+  private tourStart(rig: CameraRig, i: number): void {
+    this.tourFromPos.copy(this.world.abs(rig.camera.position, _tA));
+    this.tourFromQ.copy(rig.camera.quaternion);
+    this.tourFromMoon = this.moonAngle ?? 0;
+    this.tourPlace(rig, i);
+    this.tourToMoon = this.tourK[i].moonDeg * DEG;
+    // Restore the camera to the from-state (computePose reset the origin to
+    // 0, so rel() is the identity here; the loop's floating-origin rebase
+    // re-centers immediately after update() returns).
+    rig.camera.position.copy(this.world.rel(this.tourFromPos, _tC));
+    rig.camera.quaternion.copy(this.tourFromQ);
+    this.tourIdx = i;
+    this.tourTraveling = true;
+    this.tourT = 0;
+    this.tourDur = this.tourK[i].travelS;
+  }
+
+  /** Tour state machine: hold at keyframe i, travel to i+1, repeat. */
+  private tourUpdate(rig: CameraRig, dt: number): string {
+    const last = this.tourK.length - 1;
+    if (this.tourTraveling) {
+      this.tourT += dt;
+      const s = Math.min(this.tourT / this.tourDur, 1);
+      const e = s * s * (3 - 2 * s); // smoothstep ease in/out
+      _tA.lerpVectors(this.tourFromPos, this.tourPos[this.tourIdx], e);
+      rig.camera.position.copy(this.world.rel(_tA, _tC));
+      rig.camera.quaternion.slerpQuaternions(this.tourFromQ, this.tourQ[this.tourIdx], e);
+      this.moonAngle = this.tourFromMoon + (this.tourToMoon - this.tourFromMoon) * e;
+      if (s < 1) {
+        return `autopilot:tour ${this.tourIdx + 1}/${this.tourK.length} travel ${(s * 100).toFixed(0)}%`;
+      }
+      this.tourTraveling = false;
+      this.tourHold = this.tourK[this.tourIdx].holdS;
+    }
+    // Hold: re-apply the keyframe pose every frame (origin-independent).
+    rig.camera.position.copy(this.world.rel(this.tourPos[this.tourIdx], _tC));
+    rig.camera.quaternion.copy(this.tourQ[this.tourIdx]);
+    if (this.tourIdx < last) {
+      this.tourHold -= dt;
+      if (this.tourHold <= 0) {
+        this.tourStart(rig, this.tourIdx + 1);
+        return `autopilot:tour ${this.tourIdx + 1}/${this.tourK.length} depart`;
+      }
+      return `autopilot:tour ${this.tourIdx + 1}/${this.tourK.length} hold ${this.tourHold.toFixed(0)}s`;
+    }
+    return `autopilot:tour ${this.tourK.length}/${this.tourK.length} arrived`;
   }
 
   /** Place the camera at an absolute radial position (nadir view). */
@@ -328,6 +552,9 @@ const _east = new THREE.Vector3();
 const _qt = new THREE.Quaternion();
 const _rel = new THREE.Vector3();
 const _relLook = new THREE.Vector3();
+const _tA = new THREE.Vector3();
+const _tB = new THREE.Vector3();
+const _tC = new THREE.Vector3();
 
 const num = (q: URLSearchParams, k: string, d: number): number => {
   const v = q.get(k);
