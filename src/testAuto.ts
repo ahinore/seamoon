@@ -54,6 +54,11 @@ interface TourKey {
  * reproduce image 1); its HUD heading differs from the screenshot's 188 deg
  * because the user's exact beach spot is unknown — the COMPOSITION is what
  * is matched. K1 keeps the image-2 pose (whole Earth + moon above the limb).
+ * K1b (M11w20e) is a hold-0 departure high point: the direct K1->moon chord
+ * dips to ~1.1 Mm above Earth where the planet's disc hides the moon, so the
+ * Earth->moon crossing climbs to 13.6 Mm first — with lookAtMoon on both
+ * crossing legs the camera locks onto the live moon center and the moon is
+ * in frame for the whole crossing.
  * K3 sits where the Earth shows ~36 deg up (bearing ~233 deg) and the camera
  * tilts 33 deg off nadir toward it, framing the limb below and the Earth
  * above. K4 is the verified image-4 site (lat 44, lon 52: Earth ~25 deg up
@@ -63,9 +68,19 @@ const TOUR: TourKey[] = [
     pitchDeg: 0.7, hdgDeg: 255, moonDeg: 0, holdS: 18, travelS: 0,
     levelView: true },
   { body: 'earth', latDeg: 15.8, lonDeg: 19.3, altM: 11_690_000, agl: false,
-    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 4, travelS: 42 },
+    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 4, travelS: 12 },
+  // K1b departure high point (M11w20e, hold 0): the straight K1->K2 chord
+  // dips to ~1.1 Mm above Earth, where the planet's disc (59 deg) swallows
+  // the moon — the locked-on view would stare at Earth's surface instead of
+  // the moon it is tracking. Climbing to 13.6 Mm first keeps every chord
+  // >7.5 Mm above Earth so the tracked moon NEVER drops behind the planet.
+  // Moon angle held at 230 here (no sweep) — the 230->540 orbit sweep
+  // happens on the next leg while the camera rides the moon.
+  { body: 'earth', latDeg: 26.9, lonDeg: 38.0, altM: 13_600_000, agl: false,
+    pitchDeg: -64, hdgDeg: 0, moonDeg: 230, holdS: 0, travelS: 30,
+    lookAtMoon: true },
   { body: 'moon', latDeg: 0, lonDeg: 52, altM: 2_760_000, agl: false,
-    pitchDeg: -89, hdgDeg: 0, moonDeg: 540, holdS: 4, travelS: 45,
+    pitchDeg: -89, hdgDeg: 0, moonDeg: 540, holdS: 4, travelS: 36,
     lookAtMoon: true },
   // K3a swing fly-through (hold 0): bend the path around the moon's near
   // side limb instead of cutting straight across — the "swing around"
@@ -111,7 +126,9 @@ const TOUR: TourKey[] = [
  *   ?demo=tour                          M11w20 guided flythrough of the user's
  *                                       choreography: beach start -> whole
  *                                       Earth 11.69 Mm with the distant moon
- *                                       above the limb -> whole moon in frame
+ *                                       above the limb -> departure high point
+ *                                       13.6 Mm (M11w20e, keeps the moon
+ *                                       unoccluded) -> whole moon in frame
  *                                       2.76 Mm -> swing around the moon to a
  *                                       horizon view with the surface and the
  *                                       distant Earth -> slow landing at
@@ -132,11 +149,24 @@ export class AutoPilot {
   readonly mode: string;
   /** Flight mode suspends the test driver (the aircraft owns the pose). */
   private suspended = false;
+  /** M11w20e: the tour was aborted with F — free control owns the pose and
+   * resume() must not re-engage the scripted tour mid-leg. */
+  private tourDone = false;
   suspend(): void {
     this.suspended = true;
   }
   resume(): void {
     this.suspended = false;
+  }
+  /** F during the tour: abort the scripted tour and hand over the free
+   * camera at the current pose. @returns true when a running tour was aborted. */
+  exitTourIfRunning(): boolean {
+    if (this.mode === 'tour' && !this.tourDone) {
+      this.suspended = true;
+      this.tourDone = true;
+      return true;
+    }
+    return false;
   }
   private readonly alt0: number;
   private readonly alt1: number;
@@ -238,6 +268,7 @@ export class AutoPilot {
       ov('pitchDeg', 'tourp3'); ov('hdgDeg', 'tourh3'); ov('moonDeg', 'tourm3');
       ov('pitchDeg', 'tourp4'); ov('hdgDeg', 'tourh4'); ov('moonDeg', 'tourm4');
       ov('pitchDeg', 'tourp5'); ov('hdgDeg', 'tourh5'); ov('moonDeg', 'tourm5');
+      ov('pitchDeg', 'tourp6'); ov('hdgDeg', 'tourh6'); ov('moonDeg', 'tourm6');
       this.tourK = tk;
       const skip = Math.min(Math.max(num(q, 'touro', 0), 0), tk.length - 1);
       for (let i = 0; i <= skip; i++) {
@@ -353,7 +384,7 @@ export class AutoPilot {
   /** @returns HUD status line, or null when inactive */
   update(rig: CameraRig, dt: number): string | null {
     if (!this.mode || this.suspended) return null;
-    if (this.phase === 'done') return `autopilot:${this.mode} done`;
+    if (this.phase === 'done' || this.tourDone) return `autopilot:${this.mode} done`;
 
     const planetR = PLANET_R;
     // Absolute camera position (floating-origin aware).
@@ -553,15 +584,18 @@ export class AutoPilot {
       _tA.lerpVectors(this.tourFromPos, this.tourPos[this.tourIdx], e);
       rig.camera.position.copy(this.world.rel(_tA, _tC));
       if (this.tourK[this.tourIdx].lookAtMoon) {
-        // Moon-tracking leg (Earth -> moon): aim at the moon's LIVE center
-        // every frame (it is still sweeping during the first 60% of the leg)
-        // blended from the departure orientation — the moon never leaves the
-        // frame. The destination pose's base orientation is the same lookAt
-        // (hdg 0), so the handoff at arrival is seamless.
+        // Moon-tracking leg (Earth -> moon): the moon IS the fixation point.
+        // Lock onto the live moon center within the first ~1% of the blend
+        // (a fast ~2 s pan from the departure pose — no hard snap) and stay
+        // locked for the whole crossing; the moon sweeps along its orbit
+        // during the first 60% of the leg and the camera follows it, so it
+        // never leaves the frame. The destination pose's base orientation is
+        // the same lookAt (hdg 0), so the handoff at arrival is seamless.
         moonPositionAtAngle(this.moonAngle ?? 0, _moonC);
         _lookM.lookAt(ORIGIN, _dir.copy(_moonC).sub(_tA), UP_Y);
         _trackQ.setFromRotationMatrix(_lookM);
-        rig.camera.quaternion.slerpQuaternions(this.tourFromQ, _trackQ, e);
+        const w = Math.min(1, e / 0.01);
+        rig.camera.quaternion.slerpQuaternions(this.tourFromQ, _trackQ, w);
       } else {
         rig.camera.quaternion.slerpQuaternions(this.tourFromQ, this.tourQ[this.tourIdx], e);
       }

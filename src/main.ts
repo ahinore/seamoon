@@ -475,7 +475,15 @@ function drawDirs(show: boolean): void {
       // off-screen / behind / disc fills the view / occluded by the other
       // body: clamp to a border rectangle around the screen center along
       // the shortest on-screen direction — the arrow never disappears
-      const nx = b.sx / b.l, ny = b.sy / b.l;
+      // M11w20e: when the body's center IS on screen (huge visible disc,
+      // e.g. the whole-Earth tour stop) the clamped chevron must point
+      // BACK at the body's center — the outward bearing would point away
+      // from the disc it is standing on. Off-screen bodies keep the
+      // outward bearing (shortest-way semantics).
+      const onScreen = b.front && !occluded
+        && Math.abs(b.sx) < 0.95 && Math.abs(b.sy) < 0.9;
+      const nx = onScreen && b.l < 0.15 ? 0 : b.sx / b.l;
+      const ny = onScreen && b.l < 0.15 ? -1 : b.sy / b.l;
       const t = Math.min((W / 2 - 56) / Math.max(Math.abs(nx), 1e-6),
         (H / 2 - 100) / Math.max(Math.abs(ny), 1e-6));
       px = cx + nx * t;
@@ -503,6 +511,7 @@ function drawDirs(show: boolean): void {
       px = Math.min(Math.max(px, 30), W - 30);
       placed.push({ x: px, y: py });
       b.labelOff = 21;
+      atBody = onScreen; // flip the chevron to point at the visible disc
     }
     b.occluded = occluded;
     _dirsPlaced.push({ ...b, px, py });
@@ -719,7 +728,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w20-tour6';
+const SIM_VERSION = 'sim v11.9w20-tour7';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -735,13 +744,18 @@ if (flight.mode === 'fly' || flight.mode === 'lunar' || flight.mode === 'orbital
   world.abs(rig.camera.position, absCam);
 }
 
-/** Switch free-camera <-> aircraft (F key). */
+/** Switch free-camera <-> aircraft (F key). M11w20e: F during the tour
+ * aborts the scripted tour and hands over the free camera at the current
+ * pose (no aircraft respawn — the user keeps the tour location). */
 function toggleFlight(): void {
   if (rig.stickMode) {
     // exit to free camera at the current pose
     rig.stickMode = false;
     rig.ctl.pitch = rig.ctl.roll = rig.ctl.yaw = 0;
     auto.resume();
+  } else if (auto.exitTourIfRunning()) {
+    // tour aborted: stay in the free camera right here
+    rig.ctl.pitch = rig.ctl.roll = rig.ctl.yaw = 0;
   } else {
     flight.reset();
     rig.stickMode = true;
