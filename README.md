@@ -2,6 +2,8 @@
 
 **Seamless flight from a beach on Earth to the surface of the Moon — one continuous ride, at true scale.**
 
+![Seamoon — the full guided tour from the beach to the Moon landing](docs/seamoon-demo.mp4)
+
 [日本語版 README はこちら](README.ja.md)
 
 Seamoon is a WebGL space flight simulator built around one idea: the whole
