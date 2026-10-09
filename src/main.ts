@@ -736,7 +736,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w20-tour10';
+const SIM_VERSION = 'sim v11.9w20-tour11';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -990,6 +990,42 @@ for (let i = 0; i < speedup; i++) {
     moonView.forceReposition(world.origin); // M11c: the moon tiles went stale too
   }
 
+  // M11w20i: the moon's absolute position MUST be finalized BEFORE the LOD
+  // updates below place tiles — a tile mesh bakes node.center + bodyCenter -
+  // origin at show/reposition time. This block used to run AFTER
+  // moonView.update, so while the moon was moving (tour orbit sweep, live
+  // clock, ?moonangle) the tiles were placed at LAST frame's moon center
+  // while the fallback and the HUD arrows used the current one — two moon
+  // images offset by one frame of the moon's motion (86-1400 km/frame during
+  // the sweep = a 3-5 px "double moon", reported during the fast crossing).
+  // Moon orbit: the absolute position is written into the MOON frame center
+  // (M9.6: the registry entry is the single source of truth — PlanetView,
+  // flight physics and the nearest-body rule all read this one vector).
+  // ?moonangle=<deg> (test hook) freezes the orbit at a fixed angle.
+  // M11j: the moonshot demo OWNS the moon's position (placed at the TLI
+  // antipode by the flight model at spawn) — the live clock must not
+  // overwrite it or the transfer misses the moon by the drift.
+  if (auto.moonAngle !== null) {
+    moonPositionAtAngle(auto.moonAngle, MOON.center);
+  } else if (flight.moonshotActive || flight.returnMission) {
+    // M11j/M11w: the moonshot AND the return mission own the moon's
+    // placement (the flight model freezes it at spawn — return uses the
+    // anti-solar phase so the splashdown antipode is in daylight); the
+    // live clock must not overwrite it or the parked craft drifts off
+    // the rendered moon.
+    MOON.center.copy(flight.moonCenter);
+  } else {
+    moonPosition(performance.now() / 1000 - t0Sim, MOON.center);
+  }
+  moonView.bodyCenter.copy(MOON.center);
+  // M11w13: root stays at (0,0,0) — the tile meshes already carry the
+  // absolute->frame map (node.center + bodyCenter - origin) individually,
+  // so translating root as well double-counted the offset (the ghost
+  // second moon). The fallback (scene child) is placed here instead.
+  moonFallback.position.copy(MOON.center).sub(world.origin);
+  if (urlParams.get('moon') === '0') moonFallback.visible = false;
+  if (urlParams.get('moonfb') === '0') moonFallback.visible = false; // M11w13 diagnosis
+
   planet.update(rig.camera, world.origin, window.innerHeight);
   sea.update(rig.camera, world.origin, window.innerHeight);
   // Moon: place tiles at center + bodyCenter - origin (all double).
@@ -1045,33 +1081,8 @@ for (let i = 0; i < speedup; i++) {
   }
   cloudUniforms.uTanHalfFov.value = Math.tan(THREE.MathUtils.degToRad(rig.camera.fov) * 0.5);
   cloudUniforms.uViewportH.value = window.innerHeight;
-  // Moon orbit: the absolute position is written into the MOON frame center
-  // (M9.6: the registry entry is the single source of truth — PlanetView,
-  // flight physics and the nearest-body rule all read this one vector).
-  // ?moonangle=<deg> (test hook) freezes the orbit at a fixed angle.
-  // M11j: the moonshot demo OWNS the moon's position (placed at the TLI
-  // antipode by the flight model at spawn) — the live clock must not
-  // overwrite it or the transfer misses the moon by the drift.
-  if (auto.moonAngle !== null) {
-    moonPositionAtAngle(auto.moonAngle, MOON.center);
-  } else if (flight.moonshotActive || flight.returnMission) {
-    // M11j/M11w: the moonshot AND the return mission own the moon's
-    // placement (the flight model freezes it at spawn — return uses the
-    // anti-solar phase so the splashdown antipode is in daylight); the
-    // live clock must not overwrite it or the parked craft drifts off
-    // the rendered moon.
-    MOON.center.copy(flight.moonCenter);
-  } else {
-    moonPosition(performance.now() / 1000 - t0Sim, MOON.center);
-  }
-  moonView.bodyCenter.copy(MOON.center);
-  // M11w13: root stays at (0,0,0) — the tile meshes already carry the
-  // absolute->frame map (node.center + bodyCenter - origin) individually,
-  // so translating root as well double-counted the offset (the ghost
-  // second moon). The fallback (scene child) is placed here instead.
-  moonFallback.position.copy(MOON.center).sub(world.origin);
-  if (urlParams.get('moon') === '0') moonFallback.visible = false;
-  if (urlParams.get('moonfb') === '0') moonFallback.visible = false; // M11w13 diagnosis
+  // (M11w20i: the moon-orbit block moved ABOVE the planet/sea/moonView
+  // updates — see the comment there — so tiles never lag the fallback.)
   // Nearest-body selection (M9.2): whichever surface the camera is closest
   // to (SOI handoff reference; steers the rig's altitude/zenith). The rule
   // lives in frames.ts (M9.6) — one definition for the whole app.

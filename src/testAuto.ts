@@ -74,13 +74,14 @@ const TOUR: TourKey[] = [
   { body: 'earth', latDeg: 5.45, lonDeg: 20.75, altM: 45.9, agl: false,
     pitchDeg: 0.7, hdgDeg: 255, moonDeg: 0, holdS: 3, travelS: 0,
     levelView: true },
-  // K0b low-orbit step (M11w20h, hold 0): drifts ~100 km BACKWARD (bearing
-  // ~105, behind the K0 camera) while rising to 260 km with pitch only -12,
-  // so the horizon stays high in frame through the whole climb — user asked
-  // for a 30 s beach->space ascent that drifts back and keeps the horizon
-  // in view. K0->K0b 12 s + K0b->K1 18 s = 30 s total.
-  { body: 'earth', latDeg: 5.2, lonDeg: 21.6, altM: 260_000, agl: false,
-    pitchDeg: -12, hdgDeg: 255, moonDeg: 0, holdS: 0, travelS: 12,
+  // K0b cloud-top step (M11w20i, hold 0): the SLOW portion of the ascent now
+  // ends just above the cloud deck (CLOUD_TOP 4200 m) per feedback — 30 s to
+  // cloud height while drifting ~100 km BACKWARD (bearing ~105, behind the K0
+  // camera) with pitch only -12, so the horizon stays high in frame through
+  // the whole climb. K0b->K1 then accelerates gradually (smoothstep builds
+  // from zero) up to the whole-Earth view.
+  { body: 'earth', latDeg: 5.2, lonDeg: 21.6, altM: 5_000, agl: false,
+    pitchDeg: -12, hdgDeg: 255, moonDeg: 0, holdS: 0, travelS: 30,
     levelView: true },
   { body: 'earth', latDeg: 15.8, lonDeg: 19.3, altM: 11_690_000, agl: false,
     pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 3, travelS: 18 },
