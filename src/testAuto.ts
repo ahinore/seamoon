@@ -34,6 +34,12 @@ interface TourKey {
    * frame for the whole Earth->moon crossing. The destination's base
    * orientation is the same lookAt (hdg 0), so the handoff is seamless. */
   lookAtMoon?: boolean;
+  /** Tracking blend divisor (M11w20f): w = min(1, e / lookAtRamp). Small
+   * (0.01) = lock onto the moon almost immediately (used when the camera is
+   * already looking at the moon, e.g. the K1b -> moon leg). Large (0.15)
+   * = a slow cinematic pan from the departure pose (~5 deg/s) — no abrupt
+   * view change when leaving the whole-Earth stop. */
+  lookAtRamp?: number;
   /** Seconds to hold at arrival. */
   holdS: number;
   /** Seconds of travel from the previous keyframe. */
@@ -68,7 +74,7 @@ const TOUR: TourKey[] = [
     pitchDeg: 0.7, hdgDeg: 255, moonDeg: 0, holdS: 18, travelS: 0,
     levelView: true },
   { body: 'earth', latDeg: 15.8, lonDeg: 19.3, altM: 11_690_000, agl: false,
-    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 4, travelS: 12 },
+    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 3, travelS: 12 },
   // K1b departure high point (M11w20e, hold 0): the straight K1->K2 chord
   // dips to ~1.1 Mm above Earth, where the planet's disc (59 deg) swallows
   // the moon — the locked-on view would stare at Earth's surface instead of
@@ -78,9 +84,9 @@ const TOUR: TourKey[] = [
   // happens on the next leg while the camera rides the moon.
   { body: 'earth', latDeg: 26.9, lonDeg: 38.0, altM: 13_600_000, agl: false,
     pitchDeg: -64, hdgDeg: 0, moonDeg: 230, holdS: 0, travelS: 30,
-    lookAtMoon: true },
+    lookAtMoon: true, lookAtRamp: 0.15 },
   { body: 'moon', latDeg: 0, lonDeg: 52, altM: 2_760_000, agl: false,
-    pitchDeg: -89, hdgDeg: 0, moonDeg: 540, holdS: 4, travelS: 36,
+    pitchDeg: -89, hdgDeg: 0, moonDeg: 540, holdS: 3, travelS: 36,
     lookAtMoon: true },
   // K3a swing fly-through (hold 0): bend the path around the moon's near
   // side limb instead of cutting straight across — the "swing around"
@@ -157,6 +163,12 @@ export class AutoPilot {
   }
   resume(): void {
     this.suspended = false;
+  }
+  /** True while this driver is actively scripting the pose (the tour, the
+   * launch, ...) — main.ts freezes rig auto-level so it cannot fight the
+   * scripted orientation. */
+  get active(): boolean {
+    return !!this.mode && !this.suspended && this.phase !== 'done' && !this.tourDone;
   }
   /** F during the tour: abort the scripted tour and hand over the free
    * camera at the current pose. @returns true when a running tour was aborted. */
@@ -594,7 +606,7 @@ export class AutoPilot {
         moonPositionAtAngle(this.moonAngle ?? 0, _moonC);
         _lookM.lookAt(ORIGIN, _dir.copy(_moonC).sub(_tA), UP_Y);
         _trackQ.setFromRotationMatrix(_lookM);
-        const w = Math.min(1, e / 0.01);
+        const w = Math.min(1, e / (this.tourK[this.tourIdx].lookAtRamp ?? 0.01));
         rig.camera.quaternion.slerpQuaternions(this.tourFromQ, _trackQ, w);
       } else {
         rig.camera.quaternion.slerpQuaternions(this.tourFromQ, this.tourQ[this.tourIdx], e);

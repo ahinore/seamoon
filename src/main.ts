@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CameraRig } from './cameraRig';
 import { PlanetView } from './cubeSphereLod';
-import { makePlanetMaterial, makeSeaMaterial, makeStars, makeSunDisc, makeMilkyWay } from './materials';
+import { makePlanetMaterial, makeSeaMaterial, makeStars, makeSunDisc } from './materials';
 import { makeAtmosphereMesh, makeAtmosphereUniforms } from './atmosphere';
 import { makeCloudMesh, makeCloudUniforms } from './clouds';
 import { Hud } from './hud';
@@ -172,8 +172,8 @@ if (urlParams.get('detail') === '0') {
   material.uniforms.uDetail.value = 0;
 }
 const stars = makeStars(6000, 6e8);
-// M11n9u: the milky way band under the star points — same galactic plane
-scene.add(makeMilkyWay(6e8));
+// M11w20f: the milky way band was removed per user feedback (it read as an
+// unnatural white stripe — only the star points remain).
 scene.add(stars);
 // Sun disc (M9.4): placed along sunDir at a fixed camera distance each frame
 // (inside the far plane; stars are at 6e8 so the sun sits well inside them).
@@ -728,7 +728,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w20-tour7';
+const SIM_VERSION = 'sim v11.9w20-tour8';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
@@ -955,6 +955,7 @@ for (let i = 0; i < speedup; i++) {
       audio.chuteCrack();
     }
   } else {
+    rig.autoLevelFrozen = auto.active; // the autopilot owns the pose — no fight
     rig.update(dt);
     autoLine = auto.update(rig, dt);
     world.abs(rig.camera.position, absCam);

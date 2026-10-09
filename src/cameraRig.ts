@@ -35,6 +35,12 @@ export class CameraRig {
   readonly ctl = { pitch: 0, roll: 0, yaw: 0 };
   /** When true, update() drives the flight stick instead of the free camera. */
   stickMode = false;
+  /** M11w20f: the scripted autopilot owns the pose while this is true —
+   * auto-level must not fight it. Exiting the nadir skip cone with a scripted
+   * orientation up to a half-roll away from level read as a sudden clunk
+   * (LEVEL_RATE yanks it back at ~3 rad/s mid-pan). main.ts sets this from
+   * AutoPilot.active every frame. */
+  autoLevelFrozen = false;
   /** Max auto-level correction speed, rad/s (a 180° half-roll takes ~1 s). */
   private readonly LEVEL_RATE = 3;
 
@@ -229,7 +235,7 @@ export class CameraRig {
     this.fwd.set(0, 0, -1).applyQuaternion(q);
     this.zenith.copy(this.getUp()).normalize();
     const hasZenith = this.zenith.lengthSq() > 0.5;
-    if (hasZenith && this.autoLevel) {
+    if (hasZenith && this.autoLevel && !this.autoLevelFrozen) {
       this.rightH.crossVectors(this.fwd, this.zenith);
       if (this.rightH.lengthSq() > 0.05) {
         this.rightH.normalize();
