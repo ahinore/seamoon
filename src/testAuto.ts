@@ -29,6 +29,11 @@ interface TourKey {
    * reference, with a level up vector (the tilt+spin path gains bank once
    * the tilt passes 90 deg). */
   levelView?: boolean;
+  /** During the leg INTO this keyframe the camera tracks the moon's live
+   * center (blended from the departure orientation) so the moon stays in
+   * frame for the whole Earth->moon crossing. The destination's base
+   * orientation is the same lookAt (hdg 0), so the handoff is seamless. */
+  lookAtMoon?: boolean;
   /** Seconds to hold at arrival. */
   holdS: number;
   /** Seconds of travel from the previous keyframe. */
@@ -58,9 +63,10 @@ const TOUR: TourKey[] = [
     pitchDeg: 0.7, hdgDeg: 255, moonDeg: 0, holdS: 18, travelS: 0,
     levelView: true },
   { body: 'earth', latDeg: 15.8, lonDeg: 19.3, altM: 11_690_000, agl: false,
-    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 8, travelS: 42 },
+    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 4, travelS: 42 },
   { body: 'moon', latDeg: 0, lonDeg: 52, altM: 2_760_000, agl: false,
-    pitchDeg: -89, hdgDeg: 0, moonDeg: 540, holdS: 8, travelS: 45 },
+    pitchDeg: -89, hdgDeg: 0, moonDeg: 540, holdS: 4, travelS: 45,
+    lookAtMoon: true },
   // K3a swing fly-through (hold 0): bend the path around the moon's near
   // side limb instead of cutting straight across — the "swing around"
   // segment of the choreography. Both chords of the bend stay >100 km above
@@ -73,8 +79,8 @@ const TOUR: TourKey[] = [
   // no fov covers both. The Earth's bearing here is 249.6 deg and the
   // levelView bearing is 180 - hdgDeg, so hdg -70 aims the level view
   // straight at it; pitch 7 splits the 51 deg Earth-to-limb span evenly.
-  // (The Earth shows its night side at moon angle 180 — a dark disc, like
-  // the landing shot.)
+  // (With the M11w20c sun the Earth shows ~45% lit from the moon — half a
+  // globe, terminator visible.)
   { body: 'moon', latDeg: 30, lonDeg: 52, altM: 100_000, agl: false,
     pitchDeg: 7, hdgDeg: -70, moonDeg: 540, holdS: 8, travelS: 20,
     levelView: true },
@@ -546,7 +552,19 @@ export class AutoPilot {
       const e = s * s * (3 - 2 * s); // smoothstep ease in/out
       _tA.lerpVectors(this.tourFromPos, this.tourPos[this.tourIdx], e);
       rig.camera.position.copy(this.world.rel(_tA, _tC));
-      rig.camera.quaternion.slerpQuaternions(this.tourFromQ, this.tourQ[this.tourIdx], e);
+      if (this.tourK[this.tourIdx].lookAtMoon) {
+        // Moon-tracking leg (Earth -> moon): aim at the moon's LIVE center
+        // every frame (it is still sweeping during the first 60% of the leg)
+        // blended from the departure orientation — the moon never leaves the
+        // frame. The destination pose's base orientation is the same lookAt
+        // (hdg 0), so the handoff at arrival is seamless.
+        moonPositionAtAngle(this.moonAngle ?? 0, _moonC);
+        _lookM.lookAt(ORIGIN, _dir.copy(_moonC).sub(_tA), UP_Y);
+        _trackQ.setFromRotationMatrix(_lookM);
+        rig.camera.quaternion.slerpQuaternions(this.tourFromQ, _trackQ, e);
+      } else {
+        rig.camera.quaternion.slerpQuaternions(this.tourFromQ, this.tourQ[this.tourIdx], e);
+      }
       // Moon angle completes at 60% of the leg: while the camera is still
       // far away (e.g. leaving Earth) the moon settles at its keyframe
       // position, and the final approach converges on a STATIC moon — the
@@ -597,6 +615,11 @@ const _relLook = new THREE.Vector3();
 const _tA = new THREE.Vector3();
 const _tB = new THREE.Vector3();
 const _tC = new THREE.Vector3();
+const _moonC = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+const _lookM = new THREE.Matrix4();
+const _trackQ = new THREE.Quaternion();
+const UP_Y = new THREE.Vector3(0, 1, 0);
 
 const num = (q: URLSearchParams, k: string, d: number): number => {
   const v = q.get(k);

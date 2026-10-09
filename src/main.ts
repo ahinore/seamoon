@@ -100,9 +100,11 @@ if ((renderer as unknown as { capabilities: { reverseDepthBuffer: boolean } }).c
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-// Sun direction (unit). Slight tilt so day/night and phases are visible.
+// Sun direction (unit). M11w20c: tilted toward +Z so that from the moon's
+// tour position (orbit angle 180, anti-Earth X) the Earth shows ~half lit
+// (illuminated fraction = (1 - sun.x)/2; the old x=0.91 gave a 4% crescent).
 // Shared by terrain/sea/atmosphere materials (same uniform object).
-const sunDir = new THREE.Vector3(1, 0.3, 0.35).normalize();
+const sunDir = new THREE.Vector3(0.1, 0.35, 0.93).normalize();
 
 // ?fov=<deg> (25..120) for wide-FoV testing. The screenshot of the
 // screen-edge hole was likely taken with a wide/zoomed-out view — FoV
@@ -717,7 +719,7 @@ const fmtDist = (m: number): string =>
 
 // M11n9k: visible version tag — bump on every cloud/renderer change so a
 // stale cached module is instantly obvious in screenshots
-const SIM_VERSION = 'sim v11.9w20-tour5';
+const SIM_VERSION = 'sim v11.9w20-tour6';
 
 const auto = new AutoPilot(rig, world);
 world.abs(rig.camera.position, absCam); // autopilot placed the camera
