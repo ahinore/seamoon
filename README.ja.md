@@ -2,7 +2,9 @@
 
 **地球の海岸から月の地表まで、ひとつながりのフライトで。実際のスケールのまま。**
 
-<video controls muted playsinline width="640" src="https://raw.githubusercontent.com/ahinore/seamoon/main/docs/seamoon-demo.mp4"></video>
+![Seamoon ガイド ツアー — 海岸から月面着陸まで(早送り)](docs/seamoon-demo.gif)
+
+*[▶ フル速度の動画(2 分 27 秒)](docs/seamoon-demo.mp4)*
 
 [English README](README.md)
 

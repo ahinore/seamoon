@@ -2,7 +2,9 @@
 
 **Seamless flight from a beach on Earth to the surface of the Moon — one continuous ride, at true scale.**
 
-<video controls muted playsinline width="640" src="https://raw.githubusercontent.com/ahinore/seamoon/main/docs/seamoon-demo.mp4"></video>
+![Seamoon guided tour — beach to Moon landing (fast-forward)](docs/seamoon-demo.gif)
+
+*[▶ Full-speed video (2:27)](docs/seamoon-demo.mp4)*
 
 [日本語版 README はこちら](README.ja.md)
 
