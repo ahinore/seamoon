@@ -35,36 +35,51 @@ interface TourKey {
   travelS: number;
 }
 
-/** The user's reference screenshots (M11w20 request): start on the beach
- * (image 1), pass the Earth-from-space pose (image 2), a close moon flyby
- * (image 3: alt 2.76 Mm, moon disc centered and fully in frame with the
- * Earth hidden behind/off-screen so its nav arrow clamps to the LEFT edge —
- * the screenshot's exact camera state is not reproducible from a hover URL
- * because it was framed after manual movement, so K1.5 matches the
- * COMPOSITION: nadir view over the dayside point (0,52) puts the disc
- * dead-center, fully lit, and the Earth ~52 deg off-axis — off-screen left,
- * so its nav arrow clamps to the left edge like the screenshot), finish hovering the moon surface
- * (image 4). Numbers are read off the screenshots' HUD lines. K0 is a
- * terrain-scan beach (low sand, trees left, water ahead-right — the default
- * spawn sits 900 m inland so it cannot reproduce image 1); its HUD heading
- * differs from the screenshot's 188 deg because the user's exact beach spot
- * is unknown — the COMPOSITION (sand, trees, ocean, clouds) is what is
- * matched. The K1 moon angle 230 deg puts the moon just above the Earth's
- * limb, left of up-screen, matching image 2; the moon angle then tweens
- * monotonically 230 -> 360 (K1.5, = 0 deg: hover geometry identical to the
- * screenshot's ?moonangle=0) -> 540 (= 180 deg, K2); K2 sits where the Earth
- * shows ~25 deg up at rig-heading 118 with the moon frozen at 180 deg
- * (scan: lat 44, lon 52). */
+/** The user's choreography (M11w20c request): start on the beach (image 1),
+ * climb slowly toward the whole-Earth view with the distant moon above the
+ * limb (image 2), fly to the moon until the WHOLE moon fills the frame
+ * (dayside near-side hover at 2.76 Mm), swing around the moon to a horizon
+ * view holding BOTH the lunar surface and the distant Earth, then descend
+ * slowly to the image-4 landing site with the Earth kept in view. Path
+ * safety: the moon angle completes its tween during the FIRST 60% of each
+ * leg (while the camera is still far away), so every approach converges on a
+ * STATIC moon; the moon-local chords all stay >2 Mm above the sphere, so no
+ * leg passes through it. K0 is a terrain-scan beach (low sand, trees left,
+ * water ahead-right — the default spawn sits 900 m inland so it cannot
+ * reproduce image 1); its HUD heading differs from the screenshot's 188 deg
+ * because the user's exact beach spot is unknown — the COMPOSITION is what
+ * is matched. K1 keeps the image-2 pose (whole Earth + moon above the limb).
+ * K3 sits where the Earth shows ~36 deg up (bearing ~233 deg) and the camera
+ * tilts 33 deg off nadir toward it, framing the limb below and the Earth
+ * above. K4 is the verified image-4 site (lat 44, lon 52: Earth ~25 deg up
+ * at rig-heading 118) reached by a slow 60 s descent. */
 const TOUR: TourKey[] = [
   { body: 'earth', latDeg: 5.45, lonDeg: 20.75, altM: 45.9, agl: false,
     pitchDeg: 0.7, hdgDeg: 255, moonDeg: 0, holdS: 18, travelS: 0,
     levelView: true },
   { body: 'earth', latDeg: 15.8, lonDeg: 19.3, altM: 11_690_000, agl: false,
-    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 8, travelS: 26 },
+    pitchDeg: -82, hdgDeg: 80, moonDeg: 230, holdS: 8, travelS: 42 },
   { body: 'moon', latDeg: 0, lonDeg: 52, altM: 2_760_000, agl: false,
-    pitchDeg: -89, hdgDeg: 0, moonDeg: 360, holdS: 8, travelS: 20 },
+    pitchDeg: -89, hdgDeg: 0, moonDeg: 540, holdS: 8, travelS: 45 },
+  // K3a swing fly-through (hold 0): bend the path around the moon's near
+  // side limb instead of cutting straight across — the "swing around"
+  // segment of the choreography. Both chords of the bend stay >100 km above
+  // the sphere, so nothing passes through the moon.
+  { body: 'moon', latDeg: 0, lonDeg: 100, altM: 2_000_000, agl: false,
+    pitchDeg: -70, hdgDeg: 0, moonDeg: 540, holdS: 0, travelS: 18 },
+  // K3 surface + distant Earth in ONE frame: from 100 km up the horizon dips
+  // only ~19 deg, so the limb sits low in frame while the Earth (32 deg up
+  // here) rides above it — at higher altitude the two are ~100 deg apart and
+  // no fov covers both. The Earth's bearing here is 249.6 deg and the
+  // levelView bearing is 180 - hdgDeg, so hdg -70 aims the level view
+  // straight at it; pitch 7 splits the 51 deg Earth-to-limb span evenly.
+  // (The Earth shows its night side at moon angle 180 — a dark disc, like
+  // the landing shot.)
+  { body: 'moon', latDeg: 30, lonDeg: 52, altM: 100_000, agl: false,
+    pitchDeg: 7, hdgDeg: -70, moonDeg: 540, holdS: 8, travelS: 20,
+    levelView: true },
   { body: 'moon', latDeg: 44, lonDeg: 52, altM: 2770.8, agl: false,
-    pitchDeg: 8.1, hdgDeg: -68, moonDeg: 540, holdS: Infinity, travelS: 30,
+    pitchDeg: 8.1, hdgDeg: -68, moonDeg: 540, holdS: Infinity, travelS: 60,
     levelView: true },
 ];
 
@@ -88,18 +103,23 @@ const TOUR: TourKey[] = [
  *                                       (floating-origin stress: the camera
  *                                       crosses rebase thresholds sideways)
  *   ?demo=tour                          M11w20 guided flythrough of the user's
- *                                       four reference screenshots: beach start
- *                                       -> Earth from 11.69 Mm (moon above the
- *                                       limb) -> moon flyby 2.76 Mm (Earth
- *                                       behind the disc) -> moon surface
- *                                       2770.8 m (Earth in the sky). Smoothstep
- *                                       position lines + slerped orientation;
- *                                       the frozen moon angle tweens between
- *                                       keyframe values. Overrides per key i:
- *                                       tourp<i> tourh<i> (URL-convention
- *                                       pitch/hdg) and tourm<i> (moon angle);
- *                                       touro=N starts at keyframe N, skipping
- *                                       earlier travel.
+ *                                       choreography: beach start -> whole
+ *                                       Earth 11.69 Mm with the distant moon
+ *                                       above the limb -> whole moon in frame
+ *                                       2.76 Mm -> swing around the moon to a
+ *                                       horizon view with the surface and the
+ *                                       distant Earth -> slow landing at
+ *                                       2770.8 m with the Earth in the sky.
+ *                                       Smoothstep position lines + slerped
+ *                                       orientation; the frozen moon angle
+ *                                       completes its tween in the first 60%
+ *                                       of each leg (approaches converge on a
+ *                                       static moon — no pass-through).
+ *                                       Overrides per key i: tourp<i> tourh<i>
+ *                                       (URL-convention pitch/hdg) and
+ *                                       tourm<i> (moon angle); touro=N starts
+ *                                       at keyframe N, skipping earlier
+ *                                       travel.
  * The autopilot only moves the camera; LOD behavior stays production code.
  */
 export class AutoPilot {
@@ -210,6 +230,8 @@ export class AutoPilot {
       ov('pitchDeg', 'tourp1'); ov('hdgDeg', 'tourh1'); ov('moonDeg', 'tourm1');
       ov('pitchDeg', 'tourp2'); ov('hdgDeg', 'tourh2'); ov('moonDeg', 'tourm2');
       ov('pitchDeg', 'tourp3'); ov('hdgDeg', 'tourh3'); ov('moonDeg', 'tourm3');
+      ov('pitchDeg', 'tourp4'); ov('hdgDeg', 'tourh4'); ov('moonDeg', 'tourm4');
+      ov('pitchDeg', 'tourp5'); ov('hdgDeg', 'tourh5'); ov('moonDeg', 'tourm5');
       this.tourK = tk;
       const skip = Math.min(Math.max(num(q, 'touro', 0), 0), tk.length - 1);
       for (let i = 0; i <= skip; i++) {
@@ -525,7 +547,12 @@ export class AutoPilot {
       _tA.lerpVectors(this.tourFromPos, this.tourPos[this.tourIdx], e);
       rig.camera.position.copy(this.world.rel(_tA, _tC));
       rig.camera.quaternion.slerpQuaternions(this.tourFromQ, this.tourQ[this.tourIdx], e);
-      this.moonAngle = this.tourFromMoon + (this.tourToMoon - this.tourFromMoon) * e;
+      // Moon angle completes at 60% of the leg: while the camera is still
+      // far away (e.g. leaving Earth) the moon settles at its keyframe
+      // position, and the final approach converges on a STATIC moon — the
+      // straight-line path can never sweep through the moving sphere.
+      const me = Math.min(1, e / 0.6);
+      this.moonAngle = this.tourFromMoon + (this.tourToMoon - this.tourFromMoon) * me;
       if (s < 1) {
         return `autopilot:tour ${this.tourIdx + 1}/${this.tourK.length} travel ${(s * 100).toFixed(0)}%`;
       }
