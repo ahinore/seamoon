@@ -1167,7 +1167,9 @@ for (let i = 0; i < speedup; i++) {
     ? Math.max(absCam.distanceTo(MOON.center) - R_MOON, 0)
     : Math.max(absCam.length() - R, 0);
   const look = rig.getLookAngles();
-  const moonDist = MOON.center.length() - R_MOON;
+  // M11w20i: show CAMERA->moon surface distance (was Earth->moon, which sat
+  // frozen at 382.66 Mm through the whole crossing and read as a bug).
+  const moonDist = Math.max(absCam.distanceTo(MOON.center) - R_MOON, 0);
   const dbg = dirsDebugLines();
   hud.update([
     ...errors.slice(-3),
