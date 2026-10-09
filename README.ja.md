@@ -2,7 +2,7 @@
 
 **地球の海岸から月の地表まで、ひとつながりのフライトで。実際のスケールのまま。**
 
-![Seamoon — 海岸から月面着陸までのガイド ツアー全編](docs/seamoon-demo.mp4)
+<video controls muted playsinline width="640" src="https://raw.githubusercontent.com/ahinore/seamoon/main/docs/seamoon-demo.mp4"></video>
 
 [English README](README.md)
 
